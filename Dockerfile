@@ -127,3 +127,4 @@ COPY ./config.example.yaml /code/config.example.yaml
 
 # KonomiTV サーバーを起動
 ENTRYPOINT ["/code/server/.venv/bin/python", "KonomiTV.py"]
+CMD ["--no-akebi"]
