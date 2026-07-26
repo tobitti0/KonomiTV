@@ -166,6 +166,7 @@ class RecordedVideo(PydanticModel):
     secondary_audio_codec: Literal['AAC-LC'] | None = None
     secondary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch'] | None = None
     secondary_audio_sampling_rate: int | None = None
+    cm_analysis_status: Literal['Unanalyzed', 'Analyzing', 'Completed'] = 'Unanalyzed'
     cm_sections: list[CMSection] | None = None
     thumbnail_info: ThumbnailInfo | None = None
     created_at: datetime

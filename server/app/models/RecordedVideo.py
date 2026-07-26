@@ -55,6 +55,9 @@ class RecordedVideo(TortoiseModel):
         # segment_map は再生開始時刻から入力ファイル位置を引くためのキャッシュ
         ## 空配列は未キャッシュ状態を表し、再生可否の判定には使わない
         fields.JSONField(default=[], encoder=lambda x: json.dumps(x, ensure_ascii=False)))  # type: ignore
+    cm_analysis_status = cast(TortoiseField[Literal['Unanalyzed', 'Analyzing', 'Completed']],
+        # CM 区間解析の実行状態を表し、cm_sections が None のときに未解析と解析中を区別する
+        fields.CharField(255, default='Unanalyzed'))  # type: ignore
     cm_sections = cast(TortoiseField[list[CMSection] | None],
         # None は未解析状態を表す ([] は解析したが CM 区間がなかった/検出に失敗したことを表す)
         fields.JSONField(default=None, encoder=lambda x: json.dumps(x, ensure_ascii=False), null=True))  # type: ignore
