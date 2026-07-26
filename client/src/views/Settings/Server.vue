@@ -366,6 +366,7 @@
                 <div class="settings__item-heading">録画ファイルのバックグラウンド解析タスクを再実行</div>
                 <div class="settings__item-label">
                     録画ファイルのメタデータ解析やサムネイル作成が完了していない場合に、これらの処理を再度実行します。<br>
+                    過去の録画ファイルの CM 区間解析は自動では実行されないため、必要な場合はこのボタンから実行してください。<br>
                     PC のシャットダウンなどで途中で中断してしまった場合は、このボタンから処理を再開できます。<br>
                 </div>
                 <div class="settings__item-label mt-1">
@@ -590,4 +591,3 @@ async function shutdownServer() {
 }
 
 </script>
-

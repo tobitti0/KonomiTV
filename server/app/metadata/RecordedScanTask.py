@@ -167,6 +167,13 @@ class RecordedScanTask:
             return
         self._is_running = True
 
+        # 前回のサーバー終了時に CM 解析が中断されていた場合、実行中表示が残らないように未解析へ戻す
+        interrupted_analysis_count = await RecordedVideo.filter(cm_analysis_status='Analyzing').update(
+            cm_analysis_status='Unanalyzed',
+        )
+        if interrupted_analysis_count > 0:
+            logging.info(f'Reset {interrupted_analysis_count} interrupted CM analysis status entries.')
+
         # バックグラウンドタスクとして実行
         self._task = asyncio.create_task(self.run())
 
@@ -374,6 +381,9 @@ class RecordedScanTask:
                         file_path = canonical_path,
                         original_path = file_path,
                         existing_db_recorded_videos = existing_db_recorded_videos,
+                        # 起動時の一括取り込みで過去録画の CM 解析が一斉に始まらないよう、CM 解析だけ保留する
+                        ## 新規録画はファイル監視経由で処理され、個別・全体の再解析操作では明示的に解析される
+                        analyze_cm_sections = False,
                     )
                 except Exception as ex:
                     logging.error(f'{file_path}: Failed to process recorded file:', exc_info=ex)
@@ -463,6 +473,8 @@ class RecordedScanTask:
                         await self.processRecordedFile(
                             file_path = file_path,
                             force_update = True,
+                            # 起動時スキャン内の修復処理なので、高負荷な CM 解析は再解析操作まで保留する
+                            analyze_cm_sections = False,
                         )
                         # 処理済みファイルに追加
                         processed_collision_paths.add(file_path_str)
@@ -488,6 +500,7 @@ class RecordedScanTask:
         original_path: anyio.Path | None = None,
         existing_db_recorded_videos: dict[anyio.Path, RecordedVideoSummary] | None = None,
         force_update: bool = False,
+        analyze_cm_sections: bool = True,
         wait_background_analysis: bool = False,
     ) -> None:
         """
@@ -500,6 +513,7 @@ class RecordedScanTask:
             existing_db_recorded_videos (dict[anyio.Path, RecordedVideoSummary] | None): 既に DB に永続化されている録画ファイルパスと RecordedVideo のサマリーデータのマッピング
                 (ファイル変更イベントから呼ばれた場合、watchfiles 初期化時に取得した全レコードと今で状態が一致しているとは限らないため、None が入る)
             force_update (bool): 既に DB に登録されている録画ファイルのメタデータを強制的に再解析するかどうか (デフォルト: False)
+            analyze_cm_sections (bool): 録画完了後のバックグラウンド解析で CM 区間を解析するかどうか (デフォルト: True)
             wait_background_analysis (bool): バックグラウンド解析が完了するまで待つかどうか (デフォルト: False)
         """
 
@@ -715,7 +729,10 @@ class RecordedScanTask:
                 ## DB 保存に失敗した状態で開始すると、RecordedVideo が存在しないままサムネイル生成だけが進んでしまうため、この処理は永続化後に実行する必要がある
                 if recorded_program.recorded_video.status == 'Recorded':
                     if file_path not in self._background_tasks:
-                        task = asyncio.create_task(self.__runBackgroundAnalysis(recorded_program))
+                        task = asyncio.create_task(self.__runBackgroundAnalysis(
+                            recorded_program,
+                            analyze_cm_sections = analyze_cm_sections,
+                        ))
                         self._background_tasks[file_path] = task
 
                 # wait_background_analysis が True の場合のみ、バックグラウンド解析タスクが完了するまで待つ
@@ -982,11 +999,16 @@ class RecordedScanTask:
             db_recorded_video.segment_map = []
             # この時点では CM 区間情報は未解析なので、明示的に未解析を表す None を設定する (デフォルトで None だが念のため)
             # 「解析したが CM 区間がなかった/検出に失敗した」場合、CMSectionsDetector 側で [] が設定される
+            db_recorded_video.cm_analysis_status = 'Unanalyzed'
             db_recorded_video.cm_sections = None
             await db_recorded_video.save()
 
 
-    async def __runBackgroundAnalysis(self, recorded_program: schemas.RecordedProgram) -> None:
+    async def __runBackgroundAnalysis(
+        self,
+        recorded_program: schemas.RecordedProgram,
+        analyze_cm_sections: bool = True,
+    ) -> None:
         """
         録画完了後のバックグラウンド解析タスク
         - サムネイル生成
@@ -995,6 +1017,7 @@ class RecordedScanTask:
 
         Args:
             recorded_program (schemas.RecordedProgram): 解析対象の録画番組情報
+            analyze_cm_sections (bool): CM 区間を解析するかどうか
         """
 
         # 録画ファイルのパスを anyio.Path に変換
@@ -1006,12 +1029,19 @@ class RecordedScanTask:
             async with ProcessLimiter.getSemaphore('RecordedScanTask'):
                 # DriveIOLimiter で同一 HDD に対してのバックグラウンドタスクの同時実行数を原則1セッションに制限
                 async with DriveIOLimiter.getSemaphore(file_path):
-                    await asyncio.gather(
-                        # 録画ファイルの CM 区間を検出し DB に保存
-                        CMSectionsDetector(file_path, recorded_program.recorded_video.duration).detectAndSave(),
+                    background_tasks = [
                         # シークバー用サムネイルとリスト表示用の代表サムネイルの両方を生成
                         ThumbnailGenerator.fromRecordedProgram(recorded_program).generateAndSave(),
-                    )
+                    ]
+                    if analyze_cm_sections is True:
+                        # 録画ファイルの CM 区間を検出し DB に保存
+                        background_tasks.append(CMSectionsDetector(
+                            file_path,
+                            recorded_program.recorded_video.duration,
+                            channel_id=recorded_program.channel.id if recorded_program.channel is not None else None,
+                            service_id=recorded_program.service_id,
+                        ).detectAndSave())
+                    await asyncio.gather(*background_tasks)
             logging.info(f'{file_path}: Background analysis task completed.')
 
         except Exception as ex:

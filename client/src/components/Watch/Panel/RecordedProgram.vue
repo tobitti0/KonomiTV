@@ -53,6 +53,7 @@
                 </div>
             </div>
         </section>
+        <CMChapters />
         <section class="program-detail-container">
             <div class="program-detail" :key="detail_heading"
                 v-for="(detail_text, detail_heading) in playerStore.recorded_program.detail ?? {}">
@@ -67,6 +68,7 @@
 import { mapStores } from 'pinia';
 import { defineComponent } from 'vue';
 
+import CMChapters from '@/components/Watch/Panel/CMChapters.vue';
 import Message from '@/message';
 import usePlayerStore from '@/stores/PlayerStore';
 import useSettingsStore from '@/stores/SettingsStore';
@@ -74,6 +76,9 @@ import Utils, { ProgramUtils } from '@/utils';
 
 export default defineComponent({
     name: 'Panel-RecordedProgramTab',
+    components: {
+        CMChapters,
+    },
     data() {
         return {
             // ユーティリティをテンプレートで使えるように

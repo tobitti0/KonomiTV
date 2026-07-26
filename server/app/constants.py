@@ -67,6 +67,10 @@ AKEBI_LOG_PATH = LOGS_DIR / 'Akebi-HTTPS-Server.log'
 
 # サードパーティーライブラリのあるディレクトリ
 LIBRARY_DIR = BASE_DIR / 'thirdparty'
+## chapter_exe / logoframe / join_logo_scp をまとめた CM 解析ツールのディレクトリ
+CM_ANALYZER_DIR = LIBRARY_DIR / 'CMAnalyzer'
+## チャンネル別の logoframe 用ロゴファイルを保存するディレクトリ
+CM_ANALYZER_LOGO_DIR = DATA_DIR / 'cm-analysis/logos'
 
 # サードパーティーライブラリのあるパス
 LIBRARY_EXTENSION = ('.exe' if sys.platform == 'win32' else '.elf')

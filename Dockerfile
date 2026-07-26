@@ -1,5 +1,80 @@
 
 # --------------------------------------------------------------------------------------------------------------
+# CM 解析ツールをビルドするステージ
+# KonomiTV 本体とは独立したステージに分離し、各ツールの更新時も参照コミットだけを差し替えられるようにする
+# --------------------------------------------------------------------------------------------------------------
+
+FROM ubuntu:22.04 AS cm-analyzer-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ARG DTVINDEX_REF=c2917d6ecfa5125968d1116874ca2544f17f6ad0
+ARG CHAPTER_EXE_REF=b0687fa12b4d72b3bf94b71640ca0a847d07dcef
+ARG LOGOFRAME_REF=4785553a5b38a7513606e236bab8e50d9c01ad12
+ARG JOIN_LOGO_SCP_REF=4107b3e0e1a798287603b76b8d6d734c9c01396a
+ARG TARGETARCH
+ARG FFMPEG_TAG=autobuild-2026-05-31-13-22
+ARG FFMPEG_MAJOR_VERSION=7.1
+ARG FFMPEG_VERSION=7.1.4-7-gadcf20da26
+
+# chapter_exe / logoframe のビルドに必要なパッケージをインストール
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl git patchelf pkg-config xz-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+# KonomiTV の thirdparty/FFmpeg と同一の BtbN shared 版 SDK をビルド時だけ利用する
+# 最終イメージでは SDK をコピーせず、既存の thirdparty/FFmpeg 共有ライブラリをそのまま共用する
+WORKDIR /opt/ffmpeg-sdk/
+RUN case "${TARGETARCH}" in \
+        amd64) cm_ffmpeg_arch='linux64' ;; \
+        arm64) cm_ffmpeg_arch='linuxarm64' ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    cm_ffmpeg_archive="ffmpeg-n${FFMPEG_VERSION}-${cm_ffmpeg_arch}-gpl-shared-${FFMPEG_MAJOR_VERSION}" && \
+    curl -fsSL \
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_TAG}/${cm_ffmpeg_archive}.tar.xz" \
+        -o /tmp/ffmpeg-sdk.tar.xz && \
+    tar -xJf /tmp/ffmpeg-sdk.tar.xz --strip-components=1 && \
+    rm -f /tmp/ffmpeg-sdk.tar.xz
+
+ENV PKG_CONFIG_PATH=/opt/ffmpeg-sdk/lib/pkgconfig
+ENV LD_LIBRARY_PATH=/opt/ffmpeg-sdk/lib
+
+# 外部ツールは KonomiTV のソースツリーへ取り込まず、固定コミットから再現可能な形でビルドする
+COPY ./docker/cm-analyzer/dtvindex-trim-chapters.patch /tmp/dtvindex-trim-chapters.patch
+WORKDIR /src/
+RUN git clone https://github.com/tobitti0/dtvindex.git dtvindex && \
+    git -C dtvindex checkout "${DTVINDEX_REF}" && \
+    git -C dtvindex apply --unidiff-zero /tmp/dtvindex-trim-chapters.patch && \
+    git clone https://github.com/tobitti0/chapter_exe.git chapter_exe && \
+    git -C chapter_exe checkout "${CHAPTER_EXE_REF}" && \
+    git clone https://github.com/tobitti0/logoframe.git logoframe && \
+    git -C logoframe checkout "${LOGOFRAME_REF}" && \
+    git clone https://github.com/yobibi/join_logo_scp.git join_logo_scp && \
+    git -C join_logo_scp checkout "${JOIN_LOGO_SCP_REF}"
+
+# AviSynth には依存せず、TS を dtvindex / FFmpeg 経由で直接解析する
+RUN make -C /src/dtvindex && \
+    make -C /src/chapter_exe/src \
+        DTVINDEX_DIR=/src/dtvindex WITH_AVISYNTH=no WITH_DTVINDEX=yes && \
+    make -C /src/logoframe/src \
+        DTVINDEX_DIR=/src/dtvindex WITH_AVISYNTH=no WITH_DTVINDEX=yes && \
+    make -C /src/join_logo_scp/src
+
+# 実行ファイルと解析設定だけを最終イメージへ渡す
+RUN install -d /opt/cm-analyzer && \
+    install -m 0755 /src/dtvindex/build/dtvindex /opt/cm-analyzer/dtvindex && \
+    install -m 0755 /src/chapter_exe/src/chapter_exe /opt/cm-analyzer/chapter_exe && \
+    install -m 0755 /src/logoframe/src/logoframe /opt/cm-analyzer/logoframe && \
+    install -m 0755 /src/join_logo_scp/src/join_logo_scp /opt/cm-analyzer/join_logo_scp && \
+    install -m 0644 /src/join_logo_scp/JL/JL_標準.txt /opt/cm-analyzer/JL_標準.txt && \
+    install -m 0644 /src/logoframe/logoframe.ini /opt/cm-analyzer/logoframe.ini && \
+    patchelf --force-rpath --set-rpath '$ORIGIN/../FFmpeg' \
+        /opt/cm-analyzer/dtvindex \
+        /opt/cm-analyzer/chapter_exe \
+        /opt/cm-analyzer/logoframe
+
+# --------------------------------------------------------------------------------------------------------------
 # サードパーティーライブラリのダウンロードを行うステージ
 # Docker のマルチステージビルドを使い、最終的な Docker イメージのサイズを抑え、ビルドキャッシュを効かせる
 # --------------------------------------------------------------------------------------------------------------
@@ -107,6 +182,9 @@ RUN apt-get update && \
 # ダウンロードしておいたサードパーティーライブラリをコピー
 WORKDIR /code/server/
 COPY --from=thirdparty-downloader /thirdparty/ /code/server/thirdparty/
+
+# ビルドしておいた CM 解析ツールをコピー
+COPY --from=cm-analyzer-builder /opt/cm-analyzer/ /code/server/thirdparty/CMAnalyzer/
 
 # Poetry の依存パッケージリストだけをコピー
 COPY ./server/pyproject.toml ./server/poetry.lock ./server/poetry.toml /code/server/

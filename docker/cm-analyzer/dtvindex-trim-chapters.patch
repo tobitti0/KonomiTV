@@ -1,0 +1,816 @@
+diff --git a/Makefile b/Makefile
+index 99e38bd..84d250e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -38 +38,2 @@ PKGCONFIGDIR ?= $(LIBDIR)/pkgconfig
+-LIBRARY_OBJECTS := build/index.o build/decode.o build/trim_plan.o
++LIBRARY_OBJECTS := \
++	build/index.o build/decode.o build/trim_plan.o build/chapters.o
+@@ -61,0 +63,3 @@ build/trim_plan.o: src/trim_plan.cpp include/dtvindex/dtvindex.hpp | build
++build/chapters.o: src/chapters.cpp include/dtvindex/dtvindex.hpp | build
++	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
++
+diff --git a/include/dtvindex/dtvindex.hpp b/include/dtvindex/dtvindex.hpp
+index 4fd5033..9dfba53 100644
+--- a/include/dtvindex/dtvindex.hpp
++++ b/include/dtvindex/dtvindex.hpp
+@@ -105,6 +105,20 @@ struct TrimPlan {
+   std::vector<TrimSegment> segments;
+ };
+
++struct ChapterEntry {
++  std::uint64_t first_frame;
++  std::string name;
++};
++
++struct JoinLogoScpSegment {
++  std::uint64_t first_frame;
++  std::uint64_t last_frame;
++  std::uint64_t duration_seconds;
++  std::int64_t duration_error_frames;
++  std::uint64_t logo_seconds;
++  std::string label;
++};
++
+ class Index {
+  public:
+   static Index build(const std::string &media_path,
+@@ -162,6 +176,22 @@ DecodedLumaFrame decode_luma_frame(const std::string &media_path,
+                                    std::uint64_t frame_number);
+ std::vector<TrimRange> parse_avisynth_trim(const std::string &expression);
+ std::vector<TrimRange> load_avisynth_trim(const std::string &trim_path);
++std::vector<ChapterEntry> create_trim_chapters(
++    std::uint64_t frame_count,
++    const std::vector<TrimRange> &ranges);
++std::vector<JoinLogoScpSegment> parse_join_logo_scp_detail(
++    const std::string &text);
++std::vector<JoinLogoScpSegment> load_join_logo_scp_detail(
++    const std::string &detail_path);
++std::vector<ChapterEntry> create_join_logo_scp_chapters(
++    std::uint64_t frame_count,
++    Rational frame_rate,
++    const std::vector<TrimRange> &ranges,
++    const std::vector<JoinLogoScpSegment> &segments,
++    std::uint64_t frame_margin = 30);
++std::string ogm_chapter_text(
++    const Index &index,
++    const std::vector<ChapterEntry> &chapters);
+ TrimPlan create_trim_plan(const std::string &media_path,
+                           const Index &index,
+                           const std::vector<TrimRange> &ranges,
+diff --git a/src/main.cpp b/src/main.cpp
+index 9571844..62f059d 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -29,7 +29,9 @@ void print_usage(std::ostream &output) {
+       << "  dtvindex seek-plan INDEX FRAME\n"
+       << "  dtvindex extract-y MEDIA INDEX FRAME OUTPUT.pgm\n"
+       << "  dtvindex trim-plan MEDIA INDEX TRIM.avs -o FILTER.ffgraph\n"
+-      << "      [--plan PLAN.tsv] [--audio-stream STREAM | --video-only]\n";
++      << "      [--plan PLAN.tsv] [--audio-stream STREAM | --video-only]\n"
++      << "  dtvindex trim-chapters MEDIA INDEX TRIM.avs -o CHAPTERS.txt\n"
++      << "      [--jls JLS-DETAIL.txt]\n";
+ }
+
+ std::uint64_t parse_frame_number(const char *text) {
+@@ -313,6 +315,68 @@ int create_ffmpeg_trim_plan(int argc, char **argv) {
+   return 0;
+ }
+
++int create_trim_chapters(int argc, char **argv) {
++  if (argc < 5) {
++    throw std::runtime_error(
++        "trim-chapters requires media, index, and Trim file paths");
++  }
++  const std::string media_path = argv[2];
++  const std::string index_path = argv[3];
++  const std::string trim_path = argv[4];
++  std::string chapter_path;
++  std::string join_logo_scp_detail_path;
++
++  for (int argument = 5; argument < argc; ++argument) {
++    const std::string option = argv[argument];
++    if (option == "-o" && argument + 1 < argc) {
++      chapter_path = argv[++argument];
++    } else if (option == "--jls" && argument + 1 < argc) {
++      join_logo_scp_detail_path = argv[++argument];
++    } else {
++      throw std::runtime_error(
++          std::string("Unknown or incomplete trim-chapters option '") +
++          option + "'");
++    }
++  }
++  if (chapter_path.empty()) {
++    throw std::runtime_error(
++        "trim-chapters requires a chapter output with -o");
++  }
++
++  const dtvindex::Index index = dtvindex::Index::load(index_path);
++  std::string reason;
++  if (!index.matches_source(media_path, &reason)) {
++    throw std::runtime_error(
++        std::string("Index does not match media: ") + reason);
++  }
++  const std::vector<dtvindex::TrimRange> ranges =
++      dtvindex::load_avisynth_trim(trim_path);
++  std::vector<dtvindex::ChapterEntry> chapters;
++  if (join_logo_scp_detail_path.empty()) {
++    chapters =
++        dtvindex::create_trim_chapters(index.frames().size(), ranges);
++  } else {
++    const std::vector<dtvindex::JoinLogoScpSegment> segments =
++        dtvindex::load_join_logo_scp_detail(
++            join_logo_scp_detail_path);
++    chapters = dtvindex::create_join_logo_scp_chapters(
++        index.frames().size(),
++        index.stream().frame_rate,
++        ranges,
++        segments);
++  }
++  write_text_file(
++      chapter_path, dtvindex::ogm_chapter_text(index, chapters));
++
++  std::cout
++      << "chapters\t" << chapter_path << '\n'
++      << "chapter_source\t"
++      << (join_logo_scp_detail_path.empty() ? "trim" : "join-logo-scp")
++      << '\n'
++      << "chapter_count\t" << chapters.size() << '\n';
++  return 0;
++}
++
+ }  // namespace
+
+ int main(int argc, char **argv) {
+@@ -343,6 +407,9 @@ int main(int argc, char **argv) {
+     if (command == "trim-plan") {
+       return create_ffmpeg_trim_plan(argc, argv);
+     }
++    if (command == "trim-chapters") {
++      return create_trim_chapters(argc, argv);
++    }
+     if (command == "-h" || command == "--help" ||
+         command == "help") {
+       print_usage(std::cout);
+diff --git a/src/chapters.cpp b/src/chapters.cpp
+new file mode 100644
+index 0000000..af2e4f9
+--- /dev/null
++++ b/src/chapters.cpp
+@@ -0,0 +1,656 @@
++/*
++ * dtvindex
++ * Copyright (c) 2026 tobitti0
++ *
++ * JoinLogoScp composition analysis to OGM chapter conversion.
++ */
++
++#include "dtvindex/dtvindex.hpp"
++
++#include <algorithm>
++#include <fstream>
++#include <iomanip>
++#include <limits>
++#include <regex>
++#include <sstream>
++#include <stdexcept>
++
++extern "C" {
++#include <libavutil/mathematics.h>
++}
++
++namespace dtvindex {
++namespace {
++
++std::int64_t checked_subtract(std::int64_t left,
++                              std::int64_t right,
++                              const char *field) {
++  if ((right > 0 &&
++       left < std::numeric_limits<std::int64_t>::min() + right) ||
++      (right < 0 &&
++       left > std::numeric_limits<std::int64_t>::max() + right)) {
++    throw std::runtime_error(std::string(field) + " overflows int64");
++  }
++  return left - right;
++}
++
++std::string ogm_timestamp(std::int64_t milliseconds) {
++  if (milliseconds < 0) {
++    throw std::runtime_error("Chapter timestamp is negative");
++  }
++
++  const std::int64_t hours = milliseconds / INT64_C(3600000);
++  milliseconds %= INT64_C(3600000);
++  const std::int64_t minutes = milliseconds / INT64_C(60000);
++  milliseconds %= INT64_C(60000);
++  const std::int64_t seconds = milliseconds / INT64_C(1000);
++  const std::int64_t fraction = milliseconds % INT64_C(1000);
++
++  std::ostringstream output;
++  output
++      << std::setfill('0')
++      << std::setw(2) << hours << ':'
++      << std::setw(2) << minutes << ':'
++      << std::setw(2) << seconds << '.'
++      << std::setw(3) << fraction;
++  return output.str();
++}
++
++std::vector<TrimRange> normalized_trim_ranges(
++    std::uint64_t frame_count,
++    const std::vector<TrimRange> &ranges) {
++  if (frame_count == 0) {
++    throw std::runtime_error("The index has no video frames");
++  }
++  if (ranges.empty()) {
++    throw std::runtime_error("At least one Trim range is required");
++  }
++
++  std::vector<TrimRange> sorted_ranges = ranges;
++  std::sort(
++      sorted_ranges.begin(), sorted_ranges.end(),
++      [](const TrimRange &left, const TrimRange &right) {
++        if (left.first_frame != right.first_frame) {
++          return left.first_frame < right.first_frame;
++        }
++        return left.last_frame < right.last_frame;
++      });
++
++  std::vector<TrimRange> main_ranges;
++  for (std::vector<TrimRange>::const_iterator range =
++           sorted_ranges.begin();
++       range != sorted_ranges.end();
++       ++range) {
++    if (range->last_frame < range->first_frame) {
++      throw std::runtime_error(
++          "Trim end frame precedes its start frame");
++    }
++    if (range->last_frame >= frame_count) {
++      std::ostringstream error;
++      error << "Trim frame " << range->last_frame
++            << " is outside the index (frame count "
++            << frame_count << ')';
++      throw std::runtime_error(error.str());
++    }
++
++    if (main_ranges.empty() ||
++        range->first_frame > main_ranges.back().last_frame + 1) {
++      main_ranges.push_back(*range);
++    } else {
++      main_ranges.back().last_frame =
++          std::max(main_ranges.back().last_frame, range->last_frame);
++    }
++  }
++  return main_ranges;
++}
++
++std::uint64_t frame_duration_seconds(
++    std::uint64_t first_frame,
++    std::uint64_t end_frame,
++    Rational frame_rate) {
++  if (end_frame < first_frame) {
++    throw std::runtime_error(
++        "Chapter end frame precedes its start frame");
++  }
++  if (frame_rate.numerator <= 0 || frame_rate.denominator <= 0) {
++    throw std::runtime_error("The index has an invalid frame rate");
++  }
++  const std::uint64_t frame_duration = end_frame - first_frame;
++  if (frame_duration >
++      static_cast<std::uint64_t>(
++          std::numeric_limits<std::int64_t>::max())) {
++    throw std::runtime_error("Chapter duration is too large");
++  }
++
++  AVRational frame_time_base;
++  frame_time_base.num = frame_rate.denominator;
++  frame_time_base.den = frame_rate.numerator;
++  AVRational seconds_time_base;
++  seconds_time_base.num = 1;
++  seconds_time_base.den = 1;
++  const std::int64_t seconds = av_rescale_q_rnd(
++      static_cast<std::int64_t>(frame_duration),
++      frame_time_base,
++      seconds_time_base,
++      static_cast<AVRounding>(
++          AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
++  if (seconds < 0) {
++    throw std::runtime_error("Chapter duration is negative");
++  }
++  return static_cast<std::uint64_t>(seconds);
++}
++
++enum ChapterType {
++  kChapterNormal = 0,
++  kChapterExplicitCommercial = 1,
++  kChapterAmbiguousPart = 2,
++  kChapterStandalone = 10,
++  kChapterAmbiguousStandalone = 11,
++  kChapterEmpty = 12,
++};
++
++ChapterType chapter_type_from_duration(std::uint64_t duration_seconds) {
++  if (duration_seconds == 0) {
++    return kChapterEmpty;
++  }
++  if (duration_seconds == 90) {
++    return kChapterAmbiguousStandalone;
++  }
++  if (duration_seconds < 15) {
++    return kChapterAmbiguousPart;
++  }
++  return kChapterNormal;
++}
++
++ChapterType chapter_type_from_join_logo_scp(
++    const std::string &label,
++    std::uint64_t duration_seconds) {
++  if (label.find("Trailer(cut)") != std::string::npos) {
++    return kChapterNormal;
++  }
++  if (label.find("Trailer") != std::string::npos) {
++    return kChapterStandalone;
++  }
++  if (label.find("Sponsor") != std::string::npos ||
++      label.find("Endcard") != std::string::npos ||
++      label.find("Edge") != std::string::npos ||
++      label.find("Border") != std::string::npos) {
++    return kChapterAmbiguousStandalone;
++  }
++  if (label.find("CM") != std::string::npos) {
++    return kChapterExplicitCommercial;
++  }
++  if (duration_seconds == 90) {
++    return kChapterAmbiguousStandalone;
++  }
++  if (duration_seconds == 60) {
++    return kChapterStandalone;
++  }
++  if (duration_seconds < 15) {
++    return kChapterAmbiguousPart;
++  }
++  return kChapterNormal;
++}
++
++struct ChapterNamingState {
++  std::uint64_t part;
++  int part_existence;
++};
++
++std::string detailed_chapter_name(
++    bool is_cut,
++    ChapterType type,
++    std::uint64_t duration_seconds,
++    ChapterNamingState *state) {
++  if (!is_cut) {
++    const char part_name = static_cast<char>(
++        'A' + static_cast<int>(state->part % 23));
++    std::string name(1, part_name);
++    if (type >= kChapterStandalone) {
++      std::ostringstream standalone_name;
++      standalone_name << name << duration_seconds << "Sec";
++      name = standalone_name.str();
++    }
++
++    if (type == kChapterAmbiguousStandalone ||
++        type == kChapterAmbiguousPart) {
++      if (state->part_existence == 0) {
++        state->part_existence = 1;
++      }
++    } else if (type != kChapterEmpty) {
++      state->part_existence = 2;
++    }
++    return name;
++  }
++
++  std::string name;
++  if (type >= kChapterStandalone) {
++    std::ostringstream standalone_name;
++    standalone_name << 'X' << duration_seconds << "Sec";
++    name = standalone_name.str();
++  } else if (type == kChapterExplicitCommercial) {
++    name = "XCM";
++  } else {
++    name = "X";
++  }
++  if (state->part_existence > 0 && type != kChapterEmpty) {
++    ++state->part;
++    state->part_existence = 0;
++  }
++  return name;
++}
++
++void append_chapter(
++    std::vector<ChapterEntry> *chapters,
++    std::uint64_t frame_count,
++    std::uint64_t first_frame,
++    const std::string &name) {
++  if (first_frame >= frame_count) {
++    return;
++  }
++  ChapterEntry chapter;
++  chapter.first_frame = first_frame;
++  chapter.name = name;
++  if (!chapters->empty()) {
++    if (first_frame < chapters->back().first_frame) {
++      throw std::runtime_error(
++          "Chapter boundaries are not in chronological order");
++    }
++    if (first_frame == chapters->back().first_frame) {
++      chapters->back() = chapter;
++      return;
++    }
++  }
++  chapters->push_back(chapter);
++}
++
++bool boundary_precedes_with_margin(
++    std::uint64_t boundary,
++    std::uint64_t end_frame,
++    std::uint64_t margin) {
++  return boundary < end_frame && end_frame - boundary > margin;
++}
++
++bool boundary_is_at_or_before_with_margin(
++    std::uint64_t boundary,
++    std::uint64_t end_frame,
++    std::uint64_t margin) {
++  return boundary <= end_frame ||
++      boundary - end_frame <= margin;
++}
++
++
++}  // namespace
++
++std::vector<ChapterEntry> create_trim_chapters(
++    std::uint64_t frame_count,
++    const std::vector<TrimRange> &ranges) {
++  const std::vector<TrimRange> main_ranges =
++      normalized_trim_ranges(frame_count, ranges);
++
++  std::vector<ChapterEntry> chapters;
++  std::uint64_t next_frame = 0;
++  for (std::vector<TrimRange>::const_iterator range =
++           main_ranges.begin();
++       range != main_ranges.end();
++       ++range) {
++    if (next_frame < range->first_frame) {
++      ChapterEntry commercial;
++      commercial.first_frame = next_frame;
++      commercial.name = "CM";
++      chapters.push_back(commercial);
++    }
++
++    ChapterEntry main_program;
++    main_program.first_frame = range->first_frame;
++    main_program.name = "本編";
++    chapters.push_back(main_program);
++    next_frame = range->last_frame + 1;
++  }
++
++  if (next_frame < frame_count) {
++    ChapterEntry commercial;
++    commercial.first_frame = next_frame;
++    commercial.name = "CM";
++    chapters.push_back(commercial);
++  }
++  return chapters;
++}
++
++std::vector<JoinLogoScpSegment> parse_join_logo_scp_detail(
++    const std::string &text) {
++  const std::regex detail_pattern(
++      "^\\s*([0-9]+)\\s+([0-9]+)\\s+([0-9]+)\\s+"
++      "(-?[0-9]+)\\s+([0-9]+).*:([^\\s]+)\\s*$");
++  std::vector<JoinLogoScpSegment> segments;
++  std::istringstream input(text);
++  std::string line;
++  std::size_t line_number = 0;
++  while (std::getline(input, line)) {
++    ++line_number;
++    if (!line.empty() && line[line.size() - 1] == '\r') {
++      line.erase(line.size() - 1);
++    }
++    if (line_number == 1 && line.size() >= 3 &&
++        static_cast<unsigned char>(line[0]) == 0xef &&
++        static_cast<unsigned char>(line[1]) == 0xbb &&
++        static_cast<unsigned char>(line[2]) == 0xbf) {
++      line.erase(0, 3);
++    }
++    if (line.find_first_not_of(" \t") == std::string::npos) {
++      continue;
++    }
++
++    std::smatch fields;
++    if (!std::regex_match(line, fields, detail_pattern)) {
++      std::ostringstream error;
++      error << "Invalid JoinLogoScp detail at line "
++            << line_number << ": " << line;
++      throw std::runtime_error(error.str());
++    }
++
++    JoinLogoScpSegment segment;
++    try {
++      segment.first_frame =
++          static_cast<std::uint64_t>(std::stoull(fields[1].str()));
++      segment.last_frame =
++          static_cast<std::uint64_t>(std::stoull(fields[2].str()));
++      segment.duration_seconds =
++          static_cast<std::uint64_t>(std::stoull(fields[3].str()));
++      segment.duration_error_frames =
++          static_cast<std::int64_t>(std::stoll(fields[4].str()));
++      segment.logo_seconds =
++          static_cast<std::uint64_t>(std::stoull(fields[5].str()));
++    } catch (const std::exception &) {
++      std::ostringstream error;
++      error << "JoinLogoScp detail number is out of range at line "
++            << line_number;
++      throw std::runtime_error(error.str());
++    }
++    segment.label = fields[6].str();
++    segments.push_back(segment);
++  }
++  if (segments.empty()) {
++    throw std::runtime_error(
++        "JoinLogoScp detail contains no composition segments");
++  }
++  return segments;
++}
++
++std::vector<JoinLogoScpSegment> load_join_logo_scp_detail(
++    const std::string &detail_path) {
++  std::ifstream input(detail_path.c_str(), std::ios::binary);
++  if (!input) {
++    throw std::runtime_error(
++        std::string("Could not open JoinLogoScp detail file '") +
++        detail_path + "'");
++  }
++  std::ostringstream contents;
++  contents << input.rdbuf();
++  if (!input.good() && !input.eof()) {
++    throw std::runtime_error(
++        std::string("Could not read JoinLogoScp detail file '") +
++        detail_path + "'");
++  }
++  return parse_join_logo_scp_detail(contents.str());
++}
++
++std::vector<ChapterEntry> create_join_logo_scp_chapters(
++    std::uint64_t frame_count,
++    Rational frame_rate,
++    const std::vector<TrimRange> &ranges,
++    const std::vector<JoinLogoScpSegment> &segments,
++    std::uint64_t frame_margin) {
++  const std::vector<TrimRange> main_ranges =
++      normalized_trim_ranges(frame_count, ranges);
++  if (frame_rate.numerator <= 0 || frame_rate.denominator <= 0) {
++    throw std::runtime_error("The index has an invalid frame rate");
++  }
++  if (segments.empty()) {
++    throw std::runtime_error(
++        "At least one JoinLogoScp composition segment is required");
++  }
++
++  for (std::size_t index = 0; index < segments.size(); ++index) {
++    const JoinLogoScpSegment &segment = segments[index];
++    if (segment.last_frame < segment.first_frame) {
++      throw std::runtime_error(
++          "JoinLogoScp segment end precedes its start");
++    }
++    if (segment.last_frame >= frame_count) {
++      std::ostringstream error;
++      error << "JoinLogoScp frame " << segment.last_frame
++            << " is outside the index (frame count "
++            << frame_count << ')';
++      throw std::runtime_error(error.str());
++    }
++    if (index > 0 &&
++        segment.first_frame <= segments[index - 1].last_frame) {
++      throw std::runtime_error(
++          "JoinLogoScp composition segments overlap or are unsorted");
++    }
++  }
++
++  std::vector<std::uint64_t> trim_boundaries;
++  for (std::vector<TrimRange>::const_iterator range =
++           main_ranges.begin();
++       range != main_ranges.end();
++       ++range) {
++    trim_boundaries.push_back(range->first_frame);
++    trim_boundaries.push_back(range->last_frame + 1);
++  }
++
++  std::vector<ChapterEntry> chapters;
++  ChapterNamingState naming_state = {0, 0};
++  std::size_t trim_index = 0;
++  std::uint64_t chapter_begin = 0;
++  ChapterType last_type = kChapterNormal;
++  std::uint64_t last_calculated_seconds = 0;
++  std::uint64_t last_segment_end = 0;
++
++  if (!trim_boundaries.empty() &&
++      trim_boundaries[0] <= frame_margin) {
++    trim_index = 1;
++  }
++
++  for (std::vector<JoinLogoScpSegment>::const_iterator segment =
++           segments.begin();
++       segment != segments.end();
++       ++segment) {
++    std::uint64_t segment_end = segment->last_frame;
++
++    while (trim_index < trim_boundaries.size() &&
++           boundary_precedes_with_margin(
++               trim_boundaries[trim_index],
++               segment_end,
++               frame_margin)) {
++      const std::uint64_t trim_frame = trim_boundaries[trim_index];
++      const bool is_cut = ((trim_index + 1) % 2) != 0;
++      const std::uint64_t duration_seconds =
++          frame_duration_seconds(
++              chapter_begin, trim_frame, frame_rate);
++      const ChapterType type =
++          chapter_type_from_duration(duration_seconds);
++      append_chapter(
++          &chapters,
++          frame_count,
++          chapter_begin,
++          detailed_chapter_name(
++              is_cut, type, duration_seconds, &naming_state));
++      chapter_begin = trim_frame;
++      ++trim_index;
++    }
++
++    bool show_previous_boundary = false;
++    bool show_current_boundary = false;
++    const bool is_cut = ((trim_index + 1) % 2) != 0;
++    if (trim_index < trim_boundaries.size() &&
++        boundary_is_at_or_before_with_margin(
++            trim_boundaries[trim_index],
++            segment_end,
++            frame_margin)) {
++      segment_end = trim_boundaries[trim_index];
++      show_current_boundary = true;
++      ++trim_index;
++    }
++
++    const ChapterType type = chapter_type_from_join_logo_scp(
++        segment->label, segment->duration_seconds);
++    if (is_cut) {
++      if ((type == kChapterExplicitCommercial) !=
++          (last_type == kChapterExplicitCommercial)) {
++        show_previous_boundary = true;
++      }
++    }
++
++    if (show_previous_boundary || type >= kChapterStandalone) {
++      if (segment->first_frame > chapter_begin &&
++          segment->first_frame - chapter_begin > frame_margin) {
++        if (last_type != kChapterExplicitCommercial) {
++          last_calculated_seconds = frame_duration_seconds(
++              chapter_begin, segment->first_frame, frame_rate);
++          last_type =
++              chapter_type_from_duration(last_calculated_seconds);
++        }
++        append_chapter(
++            &chapters,
++            frame_count,
++            chapter_begin,
++            detailed_chapter_name(
++                is_cut,
++                last_type,
++                last_calculated_seconds,
++                &naming_state));
++        chapter_begin = segment->first_frame;
++      }
++    }
++
++    if (show_current_boundary || type >= kChapterStandalone) {
++      if (segment_end > chapter_begin &&
++          segment_end - chapter_begin > frame_margin) {
++        append_chapter(
++            &chapters,
++            frame_count,
++            chapter_begin,
++            detailed_chapter_name(
++                is_cut,
++                type,
++                segment->duration_seconds,
++                &naming_state));
++        chapter_begin = segment_end;
++      }
++    }
++
++    last_type = type;
++    last_segment_end = segment_end;
++  }
++
++  while (trim_index < trim_boundaries.size()) {
++    const std::uint64_t trim_frame = trim_boundaries[trim_index];
++    const bool is_cut = ((trim_index + 1) % 2) != 0;
++    const std::uint64_t duration_seconds =
++        frame_duration_seconds(
++            chapter_begin, trim_frame, frame_rate);
++    const ChapterType type =
++        chapter_type_from_duration(duration_seconds);
++    append_chapter(
++        &chapters,
++        frame_count,
++        chapter_begin,
++        detailed_chapter_name(
++            is_cut, type, duration_seconds, &naming_state));
++    chapter_begin = trim_frame;
++    ++trim_index;
++  }
++
++  if (last_segment_end > chapter_begin &&
++      last_segment_end - chapter_begin > frame_margin) {
++    const bool is_cut = ((trim_index + 1) % 2) != 0;
++    const std::uint64_t duration_seconds =
++        frame_duration_seconds(
++            chapter_begin, last_segment_end, frame_rate);
++    const ChapterType type =
++        chapter_type_from_duration(duration_seconds);
++    append_chapter(
++        &chapters,
++        frame_count,
++        chapter_begin,
++        detailed_chapter_name(
++            is_cut, type, duration_seconds, &naming_state));
++  }
++
++  if (chapters.empty()) {
++    throw std::runtime_error(
++        "JoinLogoScp detail did not produce any chapters");
++  }
++  return chapters;
++}
++
++std::string ogm_chapter_text(
++    const Index &index,
++    const std::vector<ChapterEntry> &chapters) {
++  if (index.frames().empty()) {
++    throw std::runtime_error("The index has no video frames");
++  }
++  if (chapters.empty()) {
++    throw std::runtime_error("At least one chapter is required");
++  }
++
++  const Rational time_base = index.stream().time_base;
++  if (time_base.numerator <= 0 || time_base.denominator <= 0) {
++    throw std::runtime_error("The index has an invalid video time base");
++  }
++  const FrameRecord &origin_frame = index.frames().front();
++  if ((origin_frame.flags & kFramePtsValid) == 0) {
++    throw std::runtime_error(
++        "The first indexed frame has no valid video PTS");
++  }
++
++  AVRational source_time_base;
++  source_time_base.num = time_base.numerator;
++  source_time_base.den = time_base.denominator;
++  AVRational millisecond_time_base;
++  millisecond_time_base.num = 1;
++  millisecond_time_base.den = 1000;
++
++  std::ostringstream output;
++  for (std::size_t chapter_number = 0;
++       chapter_number < chapters.size();
++       ++chapter_number) {
++    const ChapterEntry &chapter = chapters[chapter_number];
++    if (chapter.first_frame >= index.frames().size()) {
++      throw std::runtime_error(
++          "A chapter starts outside the indexed timeline");
++    }
++    const FrameRecord &chapter_frame = index.frame(chapter.first_frame);
++    if ((chapter_frame.flags & kFramePtsValid) == 0) {
++      throw std::runtime_error(
++          "A chapter boundary has no valid video PTS");
++    }
++    const std::int64_t relative_pts =
++        checked_subtract(
++            chapter_frame.pts, origin_frame.pts,
++            "Chapter timestamp");
++    if (relative_pts < 0) {
++      throw std::runtime_error(
++          "A chapter boundary precedes the timeline origin");
++    }
++    const std::int64_t milliseconds = av_rescale_q_rnd(
++        relative_pts,
++        source_time_base,
++        millisecond_time_base,
++        static_cast<AVRounding>(
++            AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
++
++    output
++        << "CHAPTER" << std::setfill('0') << std::setw(2)
++        << chapter_number + 1 << '='
++        << ogm_timestamp(milliseconds) << '\n'
++        << "CHAPTER" << std::setfill('0') << std::setw(2)
++        << chapter_number + 1 << "NAME="
++        << chapter.name << '\n';
++  }
++  return output.str();
++}
++
++}  // namespace dtvindex
