@@ -18,6 +18,7 @@
             :class="{'watch-player__buffering--display': playerStore.is_video_buffering}">
         </v-progress-circular>
         <div class="watch-player__dplayer"></div>
+        <CommentIntensityGraph v-if="playback_mode === 'Video'" />
         <div class="watch-player__dplayer-setting-cover"
             :class="{'watch-player__dplayer-setting-cover--display': playerStore.is_player_setting_panel_open}"
             @click="handleSettingCoverClick"></div>
@@ -47,6 +48,7 @@
 
 import { PropType } from 'vue';
 
+import CommentIntensityGraph from '@/components/Watch/CommentIntensityGraph.vue';
 import useChannelsStore from '@/stores/ChannelsStore';
 import usePlayerStore from '@/stores/PlayerStore';
 import useSettingsStore from '@/stores/SettingsStore';
