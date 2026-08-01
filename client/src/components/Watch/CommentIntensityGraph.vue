@@ -1,10 +1,6 @@
 <template>
     <div class="comment-intensity-graph" :class="{'comment-intensity-graph--display': should_display}"
         aria-hidden="true">
-        <div class="comment-intensity-graph__label">
-            <span class="comment-intensity-graph__label-dot"></span>
-            <span>コメント勢い</span>
-        </div>
         <svg class="comment-intensity-graph__svg"
             :viewBox="`0 0 ${COMMENT_INTENSITY_GRAPH_WIDTH} ${COMMENT_INTENSITY_GRAPH_HEIGHT}`"
             preserveAspectRatio="none">
@@ -21,13 +17,15 @@
 </template>
 <script setup lang="ts">
 
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, shallowRef, watch } from 'vue';
 
 import type { PlayerEvents } from '@/stores/PlayerStore';
 
+import useCommentIntensityGraphState from '@/components/Watch/CommentIntensityGraphState';
 import {
     buildCommentIntensityGraphPaths,
     calculateCommentIntensity,
+    calculateCommentIntensityStatistics,
     COMMENT_INTENSITY_GRAPH_HEIGHT,
     COMMENT_INTENSITY_GRAPH_WIDTH,
 } from '@/components/Watch/CommentIntensityGraphUtils';
@@ -35,17 +33,33 @@ import usePlayerStore from '@/stores/PlayerStore';
 
 // Store の初期化
 const playerStore = usePlayerStore();
+const commentIntensityGraphState = useCommentIntensityGraphState();
 
-// 集計済みのコメント勢い
-// コメントが大量にあっても、ここには最大約360点しか保持しない
-const intensity_values = ref<number[]>([]);
+// デバッグパネルから設定を変更した際に再集計できるよう、受信済みコメントを保持する
+// shallowRef を使い、大量コメントを Vue の深いリアクティブ変換対象にしない
+const initial_comments = shallowRef<PlayerEvents['CommentReceived']['comments']>([]);
+
+// コメントまたは設定が変化した時だけ再集計する
+const intensity_values = computed(() => calculateCommentIntensity(
+    initial_comments.value,
+    playerStore.recorded_program.recorded_video.duration,
+    commentIntensityGraphState.settings,
+));
+
+// コメント描画の初期化を勢い集計で待たせないため、集計は次のイベントループで実行する
+let calculation_timer_id: number | null = null;
 
 // SVG に渡す折れ線と塗りつぶし領域のパス
-const graph_paths = computed(() => buildCommentIntensityGraphPaths(intensity_values.value));
+const graph_paths = computed(() => buildCommentIntensityGraphPaths(
+    intensity_values.value,
+    commentIntensityGraphState.settings,
+));
 
 // コメント勢いが取得済みで、プレイヤーのコントロールが表示されている間だけグラフを表示する
 const should_display = computed(() => {
-    return intensity_values.value.length > 0 && playerStore.is_control_display;
+    return commentIntensityGraphState.is_enabled.value &&
+        intensity_values.value.length > 0 &&
+        playerStore.is_control_display;
 });
 
 // PlayerController が既存の過去ログコメントを取得したタイミングで、一度だけ勢いを集計する
@@ -53,10 +67,26 @@ const handleCommentReceived = (event: PlayerEvents['CommentReceived']): void => 
     if (event.is_initial_comments === false) {
         return;
     }
-    intensity_values.value = calculateCommentIntensity(
-        event.comments,
-        playerStore.recorded_program.recorded_video.duration,
-    );
+
+    // PlayerController はこのイベントの全ハンドラーを同期実行した後に DPlayer へコメントを渡す。
+    // 集計自体は軽量だが、コメント件数や将来の実装変更に関係なくコメント描画をブロックしないよう次のタスクへ送る。
+    if (calculation_timer_id !== null) {
+        window.clearTimeout(calculation_timer_id);
+    }
+    const recorded_program_id = playerStore.recorded_program.id;
+    calculation_timer_id = window.setTimeout(() => {
+        calculation_timer_id = null;
+
+        // タイマー実行前に別の録画番組へ切り替わった場合は、古いコメントからグラフを生成しない
+        if (playerStore.recorded_program.id !== recorded_program_id) {
+            return;
+        }
+        initial_comments.value = event.comments;
+        commentIntensityGraphState.setStatistics(calculateCommentIntensityStatistics(
+            event.comments,
+            playerStore.recorded_program.recorded_video.duration,
+        ));
+    }, 0);
 };
 playerStore.event_emitter.on('CommentReceived', handleCommentReceived);
 
@@ -64,12 +94,21 @@ playerStore.event_emitter.on('CommentReceived', handleCommentReceived);
 watch(
     () => playerStore.recorded_program.id,
     () => {
-        intensity_values.value = [];
+        if (calculation_timer_id !== null) {
+            window.clearTimeout(calculation_timer_id);
+            calculation_timer_id = null;
+        }
+        initial_comments.value = [];
+        commentIntensityGraphState.clearStatistics();
     },
 );
 
 // コンポーネントの破棄時は、自身が登録したイベントハンドラーだけを解除する
 onBeforeUnmount(() => {
+    if (calculation_timer_id !== null) {
+        window.clearTimeout(calculation_timer_id);
+        calculation_timer_id = null;
+    }
     playerStore.event_emitter.off('CommentReceived', handleCommentReceived);
 });
 
@@ -92,29 +131,6 @@ onBeforeUnmount(() => {
     &--display {
         opacity: 1;
         visibility: visible;
-    }
-
-    &__label {
-        display: flex;
-        position: absolute;
-        top: 1px;
-        left: 1px;
-        align-items: center;
-        color: rgba(255, 255, 255, 0.84);
-        font-size: 10px;
-        font-weight: 500;
-        line-height: 1;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
-        letter-spacing: 0.04em;
-    }
-
-    &__label-dot {
-        width: 5px;
-        height: 5px;
-        margin-right: 4px;
-        background: rgb(var(--v-theme-primary));
-        border-radius: 50%;
-        box-shadow: 0 0 5px rgb(var(--v-theme-primary));
     }
 
     &__svg {
@@ -154,10 +170,6 @@ onBeforeUnmount(() => {
         right: 0;
         bottom: 0;
         height: 34px;
-
-        &__label {
-            display: none;
-        }
     }
 }
 

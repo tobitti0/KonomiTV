@@ -19,6 +19,8 @@
         </v-progress-circular>
         <div class="watch-player__dplayer"></div>
         <CommentIntensityGraph v-if="playback_mode === 'Video'" />
+        <CommentIntensityGraphToggle v-if="playback_mode === 'Video'" />
+        <CommentIntensityGraphDebugPanel v-if="playback_mode === 'Video'" />
         <div class="watch-player__dplayer-setting-cover"
             :class="{'watch-player__dplayer-setting-cover--display': playerStore.is_player_setting_panel_open}"
             @click="handleSettingCoverClick"></div>
@@ -49,6 +51,8 @@
 import { PropType } from 'vue';
 
 import CommentIntensityGraph from '@/components/Watch/CommentIntensityGraph.vue';
+import CommentIntensityGraphDebugPanel from '@/components/Watch/CommentIntensityGraphDebugPanel.vue';
+import CommentIntensityGraphToggle from '@/components/Watch/CommentIntensityGraphToggle.vue';
 import useChannelsStore from '@/stores/ChannelsStore';
 import usePlayerStore from '@/stores/PlayerStore';
 import useSettingsStore from '@/stores/SettingsStore';
