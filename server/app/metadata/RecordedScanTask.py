@@ -1441,6 +1441,11 @@ class RecordedScanTask:
                 if db_recorded_video is None and original_file_path is not None:
                     db_recorded_video = await RecordedVideo.get_or_none(file_path=str(original_file_path))
                 if db_recorded_video is not None:
+                    # Box 上の TS と紐付いている録画番組は、ローカルファイルの削除をリアルタイム検知しても保持する
+                    ## 起動時の一括スキャンと同様に元の DB ID・コメント時刻・視聴履歴を維持し、以降は Box から再生できるようにする
+                    if BoxRecordingCatalog.has(db_recorded_video.recorded_program_id):
+                        logging.info(f'{file_path}: Kept record for removed local file because a Box recording is linked.')
+                        return
                     # RecordedVideo の親テーブルである RecordedProgram を削除すると、
                     # CASCADE 制約により RecordedVideo も同時に削除される (Channel は親テーブルにあたるため削除されない)
                     await db_recorded_video.recorded_program.delete()
