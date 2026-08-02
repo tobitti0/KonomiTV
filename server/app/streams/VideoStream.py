@@ -11,7 +11,6 @@ import uuid
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import ClassVar, Literal
 
 from biim.mpeg2ts import ts
@@ -21,6 +20,9 @@ from tortoise import transactions
 from app import logging
 from app.config import Config
 from app.constants import QUALITY_TYPES
+from app.extensions.box_streaming.BoxRandomAccessFile import (
+    ResolveRecordedVideoSourcePath,
+)
 from app.models.RecordedProgram import RecordedProgram
 from app.models.RecordedVideo import RecordedVideo
 from app.schemas import KeyFrame, SegmentMapEntry
@@ -319,7 +321,7 @@ class VideoStream:
             return
 
         async with self._source_position_lock:
-            file_path = Path(recorded_video.file_path)
+            file_path = ResolveRecordedVideoSourcePath(self.recorded_program.id, recorded_video.file_path)
 
             # segment_map キャッシュから再生を開始した場合、ソース位置は即時解決できても PID 情報が未取得のままになる
             ## 再生中のキーフレーム収集は入力 TS の PES を読むため、必要になった時点で一度だけ PAT/PMT を読む
@@ -502,7 +504,7 @@ class VideoStream:
                 return
 
             recorded_video = self.recorded_program.recorded_video
-            file_path = Path(recorded_video.file_path)
+            file_path = ResolveRecordedVideoSourcePath(self.recorded_program.id, recorded_video.file_path)
 
             if recorded_video.container_format == 'MPEG-TS':
                 # segment_map は再生開始位置のキャッシュなので、見つかればファイル I/O なしで即座に使う

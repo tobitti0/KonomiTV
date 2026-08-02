@@ -13,6 +13,9 @@ export type MylistSortOrder = 'mylist_added_desc' | 'mylist_added_asc' | 'record
 export interface IRecordedVideo {
     id: number;
     status: 'Recording' | 'Recorded' | 'AnalysisFailed';
+    storage_type: 'Local' | 'Box' | 'Local+Box';
+    box_file_id: string | null;
+    box_availability: 'Available' | 'Missing' | 'Error' | null;
     file_path: string;
     file_hash: string;
     file_size: number;
@@ -72,6 +75,9 @@ export interface IThumbnailTileInfo {
 export const IRecordedVideoDefault: IRecordedVideo = {
     id: -1,
     status: 'Recorded',
+    storage_type: 'Local',
+    box_file_id: null,
+    box_availability: null,
     file_path: '',
     file_hash: '',
     file_size: 0,

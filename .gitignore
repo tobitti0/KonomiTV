@@ -145,11 +145,18 @@ cython_debug/
 # Codex
 .codex/hooks.json
 
+# ローカル専用テスト・実ファイル検証
+/Test/
+
 # config.yaml
 config.yaml
 
+# Box Client Credentials Grant credentials
+box-credentials.json
+
 # docker-compose.yaml
 docker-compose.yaml
+docker-compose.box.yaml
 
 # user files
 server/data/*.*

@@ -17,6 +17,7 @@ from watchfiles import Change, awatch
 from app import logging, schemas
 from app.config import Config
 from app.constants import JST, THUMBNAILS_DIR
+from app.extensions.box_streaming.BoxRecordingCatalog import BoxRecordingCatalog
 from app.metadata.CMSectionsDetector import CMSectionsDetector
 from app.metadata.MetadataAnalyzer import MetadataAnalyzer
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
@@ -385,6 +386,10 @@ class RecordedScanTask:
             for index, (file_path, existing_recorded_video_summary) in enumerate(existing_db_recorded_videos.items(), start=1):
                 # ファイルの存在確認を非同期に行う
                 if not await self.isFileExists(file_path):
+                    # Box 上の TS と紐付いている録画番組は、元の DB ID・コメント時刻・視聴履歴を維持するため削除しない
+                    if BoxRecordingCatalog.has(existing_recorded_video_summary.recorded_program_id):
+                        logging.debug(f'{file_path}: Kept record because a Box recording is linked.')
+                        continue
                     # RecordedVideo の親テーブルである RecordedProgram を削除すると、
                     # CASCADE 制約により RecordedVideo も同時に削除される (Channel は親テーブルにあたるため削除されない)
                     await RecordedProgram.filter(id=existing_recorded_video_summary.recorded_program_id).delete()

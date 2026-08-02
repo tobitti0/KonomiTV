@@ -11,7 +11,7 @@ import queue
 import threading
 import time
 from collections import deque
-from typing import TYPE_CHECKING, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from biim.mpeg2ts import ts
 from biim.mpeg2ts.h264 import H264PES
@@ -25,6 +25,10 @@ from biim.mpeg2ts.pmt import PMTSection
 from app import logging
 from app.config import Config
 from app.constants import LIBRARY_PATH, QUALITY, QUALITY_TYPES
+from app.extensions.box_streaming.BoxRandomAccessFile import (
+    BoxRemotePath,
+    ResolveRecordedVideoSourcePath,
+)
 from app.schemas import KeyFrame
 from app.utils.TSKeyFrameSeeker import TSKeyFrameCollector
 
@@ -433,7 +437,8 @@ class VideoEncodingTask:
 
         # MPEG-TS 形式の場合のみ、録画ファイルを開く
         # それ以外の場合は一旦 None とする
-        file = None
+        file: Any | None = None
+        is_box_source = False
         if self.video_stream.recorded_program.recorded_video.container_format == 'MPEG-TS':
             # 再生しながらのキーフレーム収集は補助的な高速化なので、初期化に失敗しても再生本体は続ける
             ## 既存の segment_map から開始位置を解決済みの録画では、PAT/PMT や先頭 DTS の再探索が失敗してもエンコード自体は可能
@@ -441,7 +446,15 @@ class VideoEncodingTask:
                 await self.video_stream.ensureTSKeyFrameContext()
             except Exception as ex:
                 logging.warning(f'{self.video_stream.log_prefix} Failed to initialize input keyframe collector context:', exc_info=ex)
-            file = open(self.video_stream.recorded_program.recorded_video.file_path, 'rb')
+            source_path = ResolveRecordedVideoSourcePath(
+                self.video_stream.recorded_program.id,
+                self.video_stream.recorded_program.recorded_video.file_path,
+                # 連続再生では API 呼び出し回数を抑えるため、探索時より大きく先読みする
+                box_buffer_size = 16 * 1024 * 1024,
+            )
+            is_box_source = isinstance(source_path, BoxRemotePath)
+            # BoxRemotePath.open() は同期 CCG 認証と HTTP クライアント初期化を含むため、イベントループ外で開く
+            file = await asyncio.to_thread(source_path.open, 'rb')
 
         # 入力 TS を tsreadex に渡すついでに見つけたキーフレームを保持する
         ## ワーカースレッドでは DB を触らず、イベントループ側が節目ごとに segment_map へ変換して保存する
@@ -843,11 +856,12 @@ class VideoEncodingTask:
                 try:
                     # MPEG-TS を処理する場合で、直前に PAT/PMT を抽出できた場合
                     # PAT/PMT を先頭に加えて tsreadex に入力する
-                    if initial_pat_pmt_data is not None:
+                    if initial_pat_pmt_data is not None or is_box_source is True:
                         # PAT/PMT を先頭に加えた TS データ用の読み込み用パイプと書き込み用パイプを作成
                         tsreadex_stdin_read, tsreadex_stdin_write = os.pipe()
                         tsreadex_stdin_write_generation_token = self.__registerTSReadExInputPipe(tsreadex_stdin_write)
-                        pat_pmt_data: bytes = initial_pat_pmt_data
+                        # Box の仮想ファイルは fileno() を持たないため、PAT/PMT が見つからない場合もパイプ供給経路を使う
+                        pat_pmt_data: bytes = initial_pat_pmt_data or b''
                         # FeedTSStream() はワーカースレッドで動くため、クロージャ経由で参照する値をここでキャプチャしておく
                         feed_start_source_dts = current_segment.source_start_dts
                         feed_ts_stream_info = self.video_stream.ts_stream_info
