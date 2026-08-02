@@ -144,6 +144,10 @@ class RecordedVideo(PydanticModel):
     # デフォルト値は録画番組からメタデータを取得する処理向け
     id: int = -1  # メタデータ取得時は ID が定まらないため -1 を設定
     status: Literal['Recording', 'Recorded', 'AnalysisFailed']
+    # Box 録画拡張が無効な通常環境では常に Local となり、既存クライアントとの互換性を保つ
+    storage_type: Literal['Local', 'Box', 'Local+Box'] = 'Local'
+    box_file_id: str | None = None
+    box_availability: Literal['Available', 'Missing', 'Error'] | None = None
     file_path: str
     file_hash: str
     file_size: int

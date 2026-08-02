@@ -1,6 +1,6 @@
 <template>
     <router-link v-ripple class="recorded-program"
-        :to="program.recorded_video.status === 'Recorded' ? `/videos/watch/${program.id}` : { path: '' }"
+        :to="isPlayable ? `/videos/watch/${program.id}` : { path: '' }"
         :class="{
             'recorded-program--recording': program.recorded_video.status === 'Recording',
             'recorded-program--failed': program.recorded_video.status === 'AnalysisFailed',
@@ -17,6 +17,11 @@
                 <div v-else-if="program.recorded_video.status === 'AnalysisFailed'" class="recorded-program__thumbnail-status recorded-program__thumbnail-status--failed">
                     <Icon icon="fluent:error-circle-12-regular" width="15px" height="15px" />
                     メタデータ解析失敗
+                </div>
+                <div v-else-if="storageType === 'Box' && boxAvailability !== 'Available'"
+                    class="recorded-program__thumbnail-status recorded-program__thumbnail-status--failed">
+                    <Icon icon="fluent:cloud-dismiss-24-regular" width="15px" height="15px" />
+                    Box 取得不可
                 </div>
                 <div v-else-if="program.is_partially_recorded" class="recorded-program__thumbnail-status recorded-program__thumbnail-status--partial">
                     ⚠️ 一部のみ録画
@@ -39,7 +44,13 @@
                     <div class="recorded-program__content-meta-broadcaster" v-else>
                         <span class="recorded-program__content-meta-broadcaster-name">チャンネル情報なし</span>
                     </div>
-                    <div class="recorded-program__content-meta-time">{{ProgramUtils.getProgramTime(program)}}</div>
+                    <div class="recorded-program__content-meta-time">
+                        {{ProgramUtils.getProgramTime(program)}}
+                        <span v-if="storageType !== 'Local'" class="recorded-program__content-meta-storage">
+                            <Icon icon="fluent:cloud-20-filled" width="13px" height="13px" />
+                            {{storageType === 'Box' ? 'Box' : 'ローカル + Box'}}
+                        </span>
+                    </div>
                 </div>
                 <div class="recorded-program__content-description"
                     v-html="ProgramUtils.decorateProgramInfo(program, 'description')"></div>
@@ -92,19 +103,27 @@
                             </template>
                             <v-list-item-title class="ml-3">録画ファイル情報を表示</v-list-item-title>
                         </v-list-item>
+                        <v-list-item v-if="userStore.user?.is_admin" @click="show_box_file = true">
+                            <template v-slot:prepend>
+                                <Icon icon="fluent:cloud-link-20-regular" width="20px" height="20px" />
+                            </template>
+                            <v-list-item-title class="ml-3">Box file IDを登録・確認</v-list-item-title>
+                        </v-list-item>
                         <v-list-item @click="downloadVideo" :disabled="program.recorded_video.status === 'Recording'">
                             <template v-slot:prepend>
                                 <Icon icon="fluent:arrow-download-24-regular" width="20px" height="20px" />
                             </template>
                             <v-list-item-title class="ml-3">録画ファイルをダウンロード ({{ Utils.formatBytes(program.recorded_video.file_size) }})</v-list-item-title>
                         </v-list-item>
-                        <v-list-item @click="reanalyzeVideo" v-ftooltip="'再生時に必要な録画ファイル情報・番組情報・サムネイルなどをすべて再解析・再生成します（数分かかります）'">
+                        <v-list-item @click="reanalyzeVideo" :disabled="isBoxOnly"
+                            v-ftooltip="isBoxOnly ? '再解析するには Box の録画をローカルへ戻してください' : '再生時に必要な録画ファイル情報・番組情報・サムネイルなどをすべて再解析・再生成します（数分かかります）'">
                             <template v-slot:prepend>
                                 <Icon icon="fluent:book-arrow-clockwise-20-regular" width="20px" height="20px" />
                             </template>
                             <v-list-item-title class="ml-3">メタデータを再解析</v-list-item-title>
                         </v-list-item>
-                        <v-list-item @click="regenerateThumbnail()" v-ftooltip="'サムネイルのみを再生成します（数分かかります） 変更を反映するにはブラウザキャッシュの削除が必要です'">
+                        <v-list-item @click="regenerateThumbnail()" :disabled="isBoxOnly"
+                            v-ftooltip="isBoxOnly ? '再生成するには Box の録画をローカルへ戻してください' : 'サムネイルのみを再生成します（数分かかります） 変更を反映するにはブラウザキャッシュの削除が必要です'">
                             <template v-slot:prepend>
                                 <Icon icon="fluent:image-arrow-counterclockwise-24-regular" width="20px" height="20px" />
                             </template>
@@ -122,16 +141,25 @@
             </div>
         </div>
     </router-link>
-    <RecordedFileInfoDialog :program="program" v-model:show="show_video_info" />
+    <RecordedFileInfoDialog :program="displayProgram" v-model:show="show_video_info" />
+    <BoxRecordedFileDialog :program="displayProgram" v-model:show="show_box_file"
+        @linked="onBoxFileLinked" @unlinked="onBoxFileUnlinked" />
 
     <!-- 録画ファイル削除確認ダイアログ -->
     <v-dialog max-width="750" v-model="show_delete_confirmation">
         <v-card>
             <v-card-title class="d-flex justify-center pt-6 font-weight-bold">本当に録画ファイルを削除しますか？</v-card-title>
             <v-card-text class="pt-2 pb-0">
-                <div class="delete-confirmation__file-path mb-4">{{ program.recorded_video.file_path }}</div>
+                <div class="delete-confirmation__file-path mb-4">
+                    {{isBoxOnly ? `Box file ID: ${boxFileID}` : program.recorded_video.file_path}}
+                </div>
                 <div class="text-error-lighten-1 font-weight-bold">
-                    この録画ファイルに関連するすべてのデータ (サムネイル / .ts.program.txt / .ts.err を含む) が削除されます。<br>
+                    <template v-if="isBoxOnly">
+                        KonomiTV 内の番組情報・サムネイル・視聴履歴との紐付けが削除されます。Box 上の TS ファイルは削除されません。<br>
+                    </template>
+                    <template v-else>
+                        この録画ファイルに関連するすべてのデータ (サムネイル / .ts.program.txt / .ts.err を含む) が削除されます。<br>
+                    </template>
                     元に戻すことはできません。本当に録画ファイルを削除しますか？
                 </div>
             </v-card-text>
@@ -153,6 +181,9 @@
 
 import { ref, computed } from 'vue';
 
+import type { IBoxRecordedFileLink } from '@/services/extensions/BoxRecordedFiles';
+
+import BoxRecordedFileDialog from '@/components/Videos/Dialogs/BoxRecordedFileDialog.vue';
 import RecordedFileInfoDialog from '@/components/Videos/Dialogs/RecordedFileInfoDialog.vue';
 import Message from '@/message';
 import Videos, { IRecordedProgram } from '@/services/Videos';
@@ -170,6 +201,40 @@ const props = withDefaults(defineProps<{
     forWatchedHistory: false,
 });
 
+const userStore = useUserStore();
+
+// ダイアログからの手動変更を、録画一覧全体の再取得なしでこのカードへ反映する
+const boxLinkOverride = ref<IBoxRecordedFileLink | null | undefined>(undefined);
+const storageType = computed(() => {
+    if (boxLinkOverride.value === undefined) return props.program.recorded_video.storage_type;
+    if (boxLinkOverride.value === null) return 'Local' as const;
+    return props.program.recorded_video.storage_type === 'Box' ? 'Box' as const : 'Local+Box' as const;
+});
+const boxFileID = computed(() => boxLinkOverride.value === undefined
+    ? props.program.recorded_video.box_file_id
+    : boxLinkOverride.value?.box_file_id ?? null);
+const boxAvailability = computed(() => boxLinkOverride.value === undefined
+    ? props.program.recorded_video.box_availability
+    : boxLinkOverride.value?.availability ?? null);
+const displayProgram = computed<IRecordedProgram>(() => ({
+    ...props.program,
+    recorded_video: {
+        ...props.program.recorded_video,
+        storage_type: storageType.value,
+        box_file_id: boxFileID.value,
+        box_availability: boxAvailability.value,
+    },
+}));
+
+// Box だけに保存されている録画かどうか
+const isBoxOnly = computed(() => storageType.value === 'Box');
+// Box 側で取得可能な録画、またはローカルファイルが残っている録画だけ視聴画面へ遷移させる
+const isPlayable = computed(() => {
+    if (props.program.recorded_video.status !== 'Recorded') return false;
+    if (isBoxOnly.value) return boxAvailability.value === 'Available';
+    return true;
+});
+
 // Emits
 const emit = defineEmits<{
     (e: 'deleted', id: number): void;
@@ -177,6 +242,15 @@ const emit = defineEmits<{
 
 // ファイル情報ダイアログの表示状態
 const show_video_info = ref(false);
+// Box file ID 登録・確認ダイアログの表示状態
+const show_box_file = ref(false);
+
+const onBoxFileLinked = (link: IBoxRecordedFileLink) => {
+    boxLinkOverride.value = link;
+};
+const onBoxFileUnlinked = () => {
+    boxLinkOverride.value = null;
+};
 // 削除確認ダイアログの表示状態
 const show_delete_confirmation = ref(false);
 
@@ -248,7 +322,6 @@ const removeFromWatchedHistory = () => {
 
 // 録画ファイル削除確認ダイアログを表示
 const showDeleteConfirmation = () => {
-    const userStore = useUserStore();
     if (userStore.user === null || userStore.user.is_admin === false) {
         Message.warning('録画ファイルを削除するには管理者権限が必要です。\n管理者アカウントでログインし直してください。');
         return;
@@ -543,6 +616,19 @@ const deleteVideo = async () => {
                     margin-left: 0px;
                     font-size: 11px;
                 }
+            }
+
+            &-storage {
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+                margin-left: 8px;
+                padding: 1px 5px;
+                border-radius: 8px;
+                color: rgb(var(--v-theme-secondary-lighten-1));
+                background: rgba(var(--v-theme-secondary), 0.14);
+                font-size: 10.5px;
+                line-height: 14px;
             }
         }
 

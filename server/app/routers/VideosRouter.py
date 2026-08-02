@@ -24,6 +24,9 @@ from tortoise import connections
 
 from app import logging, schemas
 from app.constants import STATIC_DIR, THUMBNAILS_DIR
+from app.extensions.box_streaming.BoxRandomAccessFile import IsBoxOnlyRecording
+from app.extensions.box_streaming.BoxRecordingCatalog import BoxRecordingCatalog
+from app.extensions.box_streaming.BoxStreamsRouter import CreateBoxFileStreamingResponse
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.metadata.TSInfoAnalyzer import TSInfoAnalyzer
@@ -146,7 +149,8 @@ async def ConvertRowToRecordedProgram(row: dict[str, Any]) -> schemas.RecordedPr
     }
 
     # Pydantic モデルに変換して返す
-    return schemas.RecordedProgram.model_validate(recorded_program_dict)
+    recorded_program = schemas.RecordedProgram.model_validate(recorded_program_dict)
+    return BoxRecordingCatalog.decorateRecordedProgram(recorded_program)
 
 
 async def GetRecordedProgram(video_id: Annotated[int, Path(description='録画番組の ID 。')]) -> RecordedProgram:
@@ -692,7 +696,8 @@ async def VideoAPI(
     指定された録画番組を取得する。
     """
 
-    return recorded_program
+    recorded_program_schema = schemas.RecordedProgram.model_validate(recorded_program, from_attributes=True)
+    return BoxRecordingCatalog.decorateRecordedProgram(recorded_program_schema)
 
 
 @router.get(
@@ -706,6 +711,7 @@ async def VideoAPI(
     },
 )
 async def VideoDownloadAPI(
+    request: Request,
     recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
 ):
     """
@@ -715,6 +721,11 @@ async def VideoDownloadAPI(
     # ファイルパスとファイル名を取得
     file_path = recorded_program.recorded_video.file_path
     filename = pathlib.Path(file_path).name
+
+    # ローカルから削除済みで Box に退避されている場合は、Box API から Range 対応で中継する
+    mapping = BoxRecordingCatalog.get(recorded_program.id)
+    if pathlib.Path(file_path).is_file() is False and mapping is not None:
+        return await CreateBoxFileStreamingResponse(request, mapping.box_file_id, mapping.name)
 
     # MPEG-TS ファイルをダウンロードさせる
     return FileResponse(
@@ -836,6 +847,12 @@ async def VideoReanalyzeAPI(
     指定された録画番組のメタデータ（動画情報・番組情報・サムネイル画像・CM 区間情報など）をすべて再解析・再生成する。
     """
 
+    if IsBoxOnlyRecording(recorded_program.id, recorded_program.recorded_video.file_path):
+        raise HTTPException(
+            status_code = status.HTTP_409_CONFLICT,
+            detail = 'Box-only recordings cannot be reanalyzed without restoring the local file',
+        )
+
     try:
         file_path = anyio.Path(recorded_program.recorded_video.file_path)
         # メタデータ再解析を実行
@@ -916,6 +933,12 @@ async def VideoThumbnailRegenerateAPI(
     サムネイル画像の再生成には数分程度かかる場合がある。
     """
 
+    if IsBoxOnlyRecording(recorded_program.id, recorded_program.recorded_video.file_path):
+        raise HTTPException(
+            status_code = status.HTTP_409_CONFLICT,
+            detail = 'Box-only recordings cannot regenerate thumbnails without restoring the local file',
+        )
+
     try:
         # RecordedProgram モデルを schemas.RecordedProgram に変換
         recorded_program_schema = schemas.RecordedProgram.model_validate(recorded_program, from_attributes=True)
@@ -970,6 +993,9 @@ async def VideoDeleteAPI(
                 recorded_video__file_hash=file_hash,
             ).exclude(id=recorded_program.id).count()
             has_duplicates = duplicate_records > 0
+
+            # Box 上のファイル自体は削除せず、KonomiTV 内の紐付けだけを解除する
+            await BoxRecordingCatalog.unlink(recorded_program.id)
 
             # データベースから録画番組情報を削除
             await recorded_program.delete()

@@ -15,6 +15,16 @@
                     <span class="ml-2">ファイル情報</span>
                 </div>
                 <div class="video-info__item">
+                    <div class="video-info__item-label">保存先</div>
+                    <div class="video-info__item-value">
+                        {{program.recorded_video.storage_type === 'Local' ? 'ローカル' : program.recorded_video.storage_type === 'Box' ? 'Box' : 'ローカル + Box'}}
+                    </div>
+                </div>
+                <div v-if="program.recorded_video.box_file_id" class="video-info__item">
+                    <div class="video-info__item-label">Box file ID</div>
+                    <div class="video-info__item-value">{{program.recorded_video.box_file_id}}</div>
+                </div>
+                <div class="video-info__item">
                     <div class="video-info__item-label">ファイルパス</div>
                     <div class="video-info__item-value">{{program.recorded_video.file_path}}</div>
                 </div>

@@ -1,0 +1,16 @@
+services:
+  konomitv:
+    environment:
+      KONOMITV_BOX_CREDENTIALS_PATH: /run/secrets/konomi_box_credentials
+      # 通常運用では空のままにし、TVDashBoard のアップロード完了通知で1件ずつ登録します
+      KONOMITV_BOX_ALLOWED_FILE_IDS: ''
+      # 初期移行で Box 側を走査したい場合だけ TVDashBoard の BOX_PARENT_FOLDER_ID を指定します
+      # 通常運用は TVDashBoard から1件ずつ登録し、フォルダ全体は走査しません
+      KONOMITV_BOX_FOLDER_IDS: ''
+      KONOMITV_BOX_SYNC_INTERVAL_SECONDS: '0'
+    secrets:
+      - konomi_box_credentials
+
+secrets:
+  konomi_box_credentials:
+    file: ./box-credentials.json

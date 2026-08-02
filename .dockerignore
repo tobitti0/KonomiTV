@@ -2,6 +2,12 @@
 # config.yaml: ホスト側のファイルを利用するため不要
 config.yaml
 
+# Box の資格情報: Docker イメージには含めず、実行時に Docker Secret としてマウントする
+box-credentials.json
+
+# ローカル専用テスト・実ファイル検証: 必要な場合だけ明示的に bind mount する
+Test/
+
 # node_modules: ファイル数が多すぎてコピーに時間がかかる
 client/node_modules/
 

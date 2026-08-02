@@ -19,6 +19,11 @@ from app.constants import (
     QUALITY,
     VERSION,
 )
+from app.extensions.box_streaming import BoxRecordedFilesRouter, BoxStreamsRouter
+from app.extensions.box_streaming.Lifecycle import (
+    InitializeBoxStreamingExtension,
+    ShutdownBoxStreamingExtension,
+)
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.models.Channel import Channel
 from app.models.Program import Program
@@ -73,6 +78,8 @@ app.include_router(VideosRouter.router)
 app.include_router(SeriesRouter.router)
 app.include_router(LiveStreamsRouter.router)
 app.include_router(VideoStreamsRouter.router)
+app.include_router(BoxStreamsRouter.router)
+app.include_router(BoxRecordedFilesRouter.router)
 app.include_router(ReservationsRouter.router)
 app.include_router(ReservationConditionsRouter.router)
 app.include_router(RecordingPresetsRouter.router)
@@ -223,6 +230,9 @@ recorded_scan_task: RecordedScanTask | None = None
 async def Startup():
     global recorded_scan_task
 
+    # Box 上へ退避済みの録画番組をローカルファイル削除スキャンから保護するため、録画スキャンより先に同期する
+    await InitializeBoxStreamingExtension()
+
     # チャンネル情報を更新
     await Channel.update()
 
@@ -287,6 +297,9 @@ async def Shutdown():
     if recorded_scan_task is not None:
         await recorded_scan_task.stop()
         recorded_scan_task = None
+
+    # Box 録画拡張の定期同期と HTTP クライアントを停止
+    await ShutdownBoxStreamingExtension()
 
     # 非同期タスクの終了処理が完全に終わるよう、もう少しだけ待つ
     # この待機を省略すると LiveEncodingTask などの終了前に Tortoise ORM の DB 接続が閉じられ、エラートレースバックが出力される
