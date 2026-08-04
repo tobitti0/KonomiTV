@@ -164,6 +164,8 @@ server/data/account-icons/*.*
 server/data/thumbnails/*.*
 server/data/thumbnails/old/*.*
 server/data/twitter*
+server/data/box-history-import/
+server/data/backups/
 server/static/interlaced_*
 
 # thirdparty
