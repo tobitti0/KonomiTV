@@ -6,8 +6,8 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Coroutine
-from typing import Annotated, Any, Literal
+from collections.abc import Awaitable
+from typing import Annotated, Literal
 
 import anyio
 import psutil
@@ -25,6 +25,7 @@ from app.constants import (
     RESTART_REQUIRED_LOCK_PATH,
     THUMBNAILS_DIR,
 )
+from app.metadata.CMAnalysisManager import CM_ANALYSIS_MANAGER
 from app.metadata.CMSectionsDetector import CMSectionsDetector
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
@@ -219,6 +220,69 @@ async def BatchScanAPI():
 
 
 @router.post(
+    '/cm-analysis',
+    summary = 'CM 区間一括解析開始 API',
+    status_code = status.HTTP_202_ACCEPTED,
+)
+async def CMAnalysisBatchStartAPI(
+    request: schemas.CMAnalysisBatchRequest,
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+) -> schemas.CMAnalysisJob:
+    """
+    録画 ID・ジャンル・現在の解析状態で対象を選択し、CM 区間解析をバックグラウンドで開始する。<br>
+    同時実行数は 1～4 の範囲で指定でき、既定値は2。<br>
+    JWT エンコードされたアクセストークンが設定され、かつ管理者アカウントでないと実行できない。
+    """
+
+    # Depends() による管理者確認を明示的に残しつつ、処理自体ではユーザー情報を利用しない
+    _ = current_user
+    try:
+        return await CM_ANALYSIS_MANAGER.startAnalysis(request, trigger='Batch')
+    except RuntimeError as ex:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(ex),
+        ) from ex
+
+
+@router.get(
+    '/cm-analysis',
+    summary = 'CM 区間一括解析状態取得 API',
+)
+async def CMAnalysisBatchStatusAPI(
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+) -> schemas.CMAnalysisJob:
+    """
+    現在実行中、または直近に完了した CM 区間一括解析の進捗を取得する。<br>
+    JWT エンコードされたアクセストークンが設定され、かつ管理者アカウントでないと実行できない。
+    """
+
+    _ = current_user
+    return CM_ANALYSIS_MANAGER.getState()
+
+
+@router.delete(
+    '/cm-analysis',
+    summary = 'CM 区間一括解析キャンセル API',
+    status_code = status.HTTP_204_NO_CONTENT,
+)
+async def CMAnalysisBatchCancelAPI(
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+) -> None:
+    """
+    実行中の CM 区間一括解析をキャンセルし、実行中だった録画の表示状態を解析前へ戻す。<br>
+    JWT エンコードされたアクセストークンが設定され、かつ管理者アカウントでないと実行できない。
+    """
+
+    _ = current_user
+    if await CM_ANALYSIS_MANAGER.cancelAnalysis() is False:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='CM analysis job is not running',
+        )
+
+
+@router.post(
     '/run-background-analysis',
     summary = 'バックグラウンド解析タスク手動実行 API',
     status_code = status.HTTP_204_NO_CONTENT,
@@ -244,6 +308,7 @@ async def BackgroundAnalysisAPI():
             'file_path',
             'file_hash',
             'duration',
+            'cm_analysis_status',
             'cm_sections',
         )
 
@@ -258,7 +323,7 @@ async def BackgroundAnalysisAPI():
                     continue
 
                 # CM 区間検出とサムネイル生成を同時に実行
-                tasks: list[Coroutine[Any, Any, None]] = []
+                tasks: list[Awaitable[object]] = []
 
                 # CM 区間検出ではサービス ID、サムネイル生成では録画番組全体を利用するため、
                 # どちらかの解析が必要な場合だけ録画番組情報をまとめて取得する
@@ -266,7 +331,8 @@ async def BackgroundAnalysisAPI():
                 thumbnail_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{video_row["file_hash"]}.webp'
                 needs_thumbnail = (not await thumbnail_tile_path.is_file()) or (not await thumbnail_path.is_file())
                 recorded_program: schemas.RecordedProgram | None = None
-                if video_row['cm_sections'] is None or needs_thumbnail is True:
+                needs_cm_analysis = video_row['cm_analysis_status'] in ['Unanalyzed', 'Failed']
+                if needs_cm_analysis is True or needs_thumbnail is True:
                     db_recorded_program = await RecordedProgram.all() \
                         .select_related('recorded_video') \
                         .select_related('channel') \
@@ -277,10 +343,9 @@ async def BackgroundAnalysisAPI():
                             from_attributes=True,
                         )
 
-                # CM 区間情報が未解析の場合、タスクに追加
-                ## cm_sections が [] の時は「解析はしたが CM 区間がなかった/検出に失敗した」ことを表している
-                ## CM 区間解析はかなり計算コストが高い処理のため、一度解析に失敗した録画ファイルは再解析しない
-                if video_row['cm_sections'] is None and recorded_program is not None:
+                # CM 区間が未解析、または前回失敗した場合はタスクに追加する
+                # 失敗時は以前の正常な cm_sections を保持するため、対象判定には cm_sections ではなく専用状態を使う
+                if needs_cm_analysis is True and recorded_program is not None:
                     tasks.append(CMSectionsDetector(
                         file_path = anyio.Path(video_row['file_path']),
                         duration_sec = video_row['duration'],

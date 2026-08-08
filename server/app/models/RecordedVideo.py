@@ -12,7 +12,13 @@ from tortoise.fields import Field as TortoiseField
 from tortoise.models import Model as TortoiseModel
 
 from app.models.RecordedProgram import RecordedProgram
-from app.schemas import CMSection, KeyFrame, SegmentMapEntry, ThumbnailInfo
+from app.schemas import (
+    CMAnalysisError,
+    CMSection,
+    KeyFrame,
+    SegmentMapEntry,
+    ThumbnailInfo,
+)
 
 
 class RecordedVideo(TortoiseModel):
@@ -55,11 +61,19 @@ class RecordedVideo(TortoiseModel):
         # segment_map は再生開始時刻から入力ファイル位置を引くためのキャッシュ
         ## 空配列は未キャッシュ状態を表し、再生可否の判定には使わない
         fields.JSONField(default=[], encoder=lambda x: json.dumps(x, ensure_ascii=False)))  # type: ignore
-    cm_analysis_status = cast(TortoiseField[Literal['Unanalyzed', 'Analyzing', 'Completed']],
+    cm_analysis_status = cast(TortoiseField[Literal['Unanalyzed', 'Analyzing', 'Completed', 'Failed']],
         # CM 区間解析の実行状態を表し、cm_sections が None のときに未解析と解析中を区別する
         fields.CharField(255, default='Unanalyzed'))  # type: ignore
+    cm_analysis_error = cast(TortoiseField[CMAnalysisError | None],
+        # 直近の解析が失敗した理由を UI と API から確認するために保持する
+        ## 再解析が成功した時点で None に戻す
+        fields.JSONField(default=None, encoder=lambda x: json.dumps(x, ensure_ascii=False), null=True))  # type: ignore
+    cm_analysis_started_at = cast(TortoiseField[datetime | None], fields.DatetimeField(null=True))
+    cm_analysis_completed_at = cast(TortoiseField[datetime | None], fields.DatetimeField(null=True))
+    cm_analysis_elapsed_time = cast(TortoiseField[float | None], fields.FloatField(null=True))
     cm_sections = cast(TortoiseField[list[CMSection] | None],
-        # None は未解析状態を表す ([] は解析したが CM 区間がなかった/検出に失敗したことを表す)
+        # None は正常な解析結果がまだ存在しないことを表す ([] は正常に解析した結果 CM 区間がなかったことを表す)
+        ## 再解析に失敗した場合は、以前の正常な結果を利用し続けられるよう既存値を保持する
         fields.JSONField(default=None, encoder=lambda x: json.dumps(x, ensure_ascii=False), null=True))  # type: ignore
     thumbnail_info = cast(TortoiseField[ThumbnailInfo | None],
         # None はサムネイル未生成か、旧仕様から移行しきれていないことを表す
