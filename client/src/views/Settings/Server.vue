@@ -378,6 +378,57 @@
                 <Icon icon="fluent:book-arrow-clockwise-20-regular" height="20px" />
                 <span class="ml-2">バックグラウンド解析タスクを再実行</span>
             </v-btn>
+            <div class="settings__item">
+                <div class="settings__item-heading">CM 区間解析を一括実行</div>
+                <div class="settings__item-label">
+                    chapter_exe・logoframe・join_logo_scp・dtvindex を使い、指定条件に一致する録画番組の CM 区間を解析します。<br>
+                    解析は API リクエスト終了後もバックグラウンドで継続し、失敗した工程と終了コードも記録されます。<br>
+                </div>
+                <v-select class="settings__item-form mt-3" color="primary" variant="outlined" hide-details
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    :items="cm_analysis_target_options"
+                    v-model="cm_analysis_target">
+                </v-select>
+                <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details clearable
+                    label="ジャンル絞り込み（例: アニメ、国内アニメ）"
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    v-model="cm_analysis_genre">
+                </v-text-field>
+                <v-select class="settings__item-form" color="primary" variant="outlined" hide-details
+                    label="同時実行数"
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    :items="[1, 2, 3, 4]"
+                    v-model="cm_analysis_concurrency">
+                </v-select>
+                <v-checkbox class="settings__item-form" color="primary" hide-details
+                    label="既存のチャプターファイルを使わず、解析ツールをすべて再実行する"
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    v-model="cm_analysis_force">
+                </v-checkbox>
+                <div class="settings__item-label mt-3" v-if="cm_analysis_job !== null && cm_analysis_job.status !== 'Idle'">
+                    状態: {{cm_analysis_job.status}} / {{cm_analysis_job.processed}} / {{cm_analysis_job.total}} 件
+                    （成功 {{cm_analysis_job.succeeded}} 件・失敗 {{cm_analysis_job.failed}} 件）
+                </div>
+                <v-progress-linear class="mt-2" color="primary" height="6" rounded
+                    :indeterminate="cm_analysis_job?.status === 'Running' && cm_analysis_job.total === 0"
+                    :model-value="cm_analysis_progress"
+                    v-if="cm_analysis_job !== null && ['Running', 'Canceling'].includes(cm_analysis_job.status)">
+                </v-progress-linear>
+            </div>
+            <div class="d-flex ga-3 mt-5">
+                <v-btn class="settings__save-button mt-0" color="background-lighten-2" variant="flat"
+                    :disabled="cm_analysis_job !== null && ['Running', 'Canceling'].includes(cm_analysis_job.status)"
+                    @click="startCMAnalysis()">
+                    <Icon icon="fluent:video-clip-wand-24-regular" height="20px" />
+                    <span class="ml-2">CM 区間解析を開始</span>
+                </v-btn>
+                <v-btn class="settings__save-button mt-0" color="error" variant="flat"
+                    :disabled="cm_analysis_job === null || !['Running', 'Canceling'].includes(cm_analysis_job.status)"
+                    @click="cancelCMAnalysis()">
+                    <Icon icon="fluent:stop-16-filled" height="18px" />
+                    <span class="ml-2">停止</span>
+                </v-btn>
+            </div>
         </div>
         <div class="settings__content" :class="{'settings__content--disabled': is_disabled}">
             <div class="settings__item">
@@ -414,12 +465,12 @@
 </template>
 <script lang="ts" setup>
 
-import { ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 
 import AccountManageSettings from '@/components/Settings/AccountManageSettings.vue';
 import ServerLogDialog from '@/components/Settings/ServerLogDialog.vue';
 import Message from '@/message';
-import Maintenance from '@/services/Maintenance';
+import Maintenance, { type CMAnalysisTarget, type ICMAnalysisJob } from '@/services/Maintenance';
 import Settings, { IServerSettings, IServerSettingsDefault } from '@/services/Settings';
 import Version from '@/services/Version';
 import useUserStore from '@/stores/UserStore';
@@ -487,12 +538,39 @@ const preferred_terrestrial_region_options = [
     { title: '沖縄県', value: '沖縄県' },
 ];
 
+// CM 区間一括解析の対象条件
+const cm_analysis_target_options: {title: string; value: CMAnalysisTarget}[] = [
+    { title: '未解析または前回失敗した録画', value: 'UnanalyzedOrFailed' },
+    { title: '未解析の録画のみ', value: 'Unanalyzed' },
+    { title: '前回失敗した録画のみ', value: 'Failed' },
+    { title: '解析済みを含むすべての録画', value: 'All' },
+];
+const cm_analysis_target = ref<CMAnalysisTarget>('UnanalyzedOrFailed');
+const cm_analysis_genre = ref<string | null>(null);
+const cm_analysis_concurrency = ref(2);
+const cm_analysis_force = ref(false);
+const cm_analysis_job = ref<ICMAnalysisJob | null>(null);
+const cm_analysis_progress = computed(() => {
+    if (cm_analysis_job.value === null || cm_analysis_job.value.total === 0) {
+        return 0;
+    }
+    return cm_analysis_job.value.processed / cm_analysis_job.value.total * 100;
+});
+let is_cm_analysis_polling = false;
+let is_component_active = true;
+
 // ユーザー情報を取得し、もし管理者権限であれば無効化を解除
 const is_disabled = ref(true);
 const user_store = useUserStore();
 user_store.fetchUser().then((user) => {
     if (user && user.is_admin) {
         is_disabled.value = false;
+        Maintenance.fetchCMAnalysisStatus().then((job) => {
+            cm_analysis_job.value = job;
+            if (job !== null && ['Running', 'Canceling'].includes(job.status)) {
+                pollCMAnalysisStatus(false);
+            }
+        });
     }
 });
 
@@ -568,6 +646,67 @@ async function startBackgroundAnalysis() {
     }
 }
 
+// CM 区間一括解析の進捗を、設定画面を開いている間だけ定期取得する
+async function pollCMAnalysisStatus(show_completion_message: boolean) {
+    if (is_cm_analysis_polling === true) {
+        return;
+    }
+    is_cm_analysis_polling = true;
+    try {
+        while (is_component_active === true) {
+            const job = await Maintenance.fetchCMAnalysisStatus();
+            if (job === null) {
+                return;
+            }
+            cm_analysis_job.value = job;
+            if (!['Running', 'Canceling'].includes(job.status)) {
+                if (show_completion_message === true) {
+                    if (job.status === 'Completed') {
+                        Message.success(
+                            `CM 区間解析が完了しました。成功 ${job.succeeded} 件・失敗 ${job.failed} 件です。`
+                        );
+                    } else if (job.status === 'Canceled') {
+                        Message.info('CM 区間解析を停止しました。');
+                    } else if (job.status === 'Failed') {
+                        Message.error('CM 区間解析ジョブ自体が異常終了しました。サーバーログを確認してください。');
+                    }
+                }
+                return;
+            }
+            await Utils.sleep(2.0);
+        }
+    } finally {
+        is_cm_analysis_polling = false;
+    }
+}
+
+// 設定画面で指定された条件を使って CM 区間一括解析を開始する
+async function startCMAnalysis() {
+    const job = await Maintenance.startCMAnalysis({
+        target: cm_analysis_target.value,
+        genre: cm_analysis_genre.value?.trim() || null,
+        concurrency: cm_analysis_concurrency.value,
+        force: cm_analysis_force.value,
+    });
+    if (job === null) {
+        return;
+    }
+    cm_analysis_job.value = job;
+    if (job.total === 0) {
+        Message.info('指定条件に一致する CM 区間解析対象はありませんでした。');
+        return;
+    }
+    Message.info(`CM 区間解析を開始しました。対象は ${job.total} 件です。`);
+    pollCMAnalysisStatus(true);
+}
+
+// 実行中の CM 区間一括解析と外部コマンドを安全に停止する
+async function cancelCMAnalysis() {
+    if (await Maintenance.cancelCMAnalysis() === true) {
+        await pollCMAnalysisStatus(true);
+    }
+}
+
 // KonomiTV サーバーの再起動を行う関数
 async function restartServer() {
     const result = await Maintenance.restartServer();
@@ -589,5 +728,9 @@ async function shutdownServer() {
         Message.success('KonomiTV サーバーをシャットダウンしました。');
     }
 }
+
+onBeforeUnmount(() => {
+    is_component_active = false;
+});
 
 </script>

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import pathlib
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar, Literal, cast
@@ -22,6 +23,7 @@ from app.metadata.CMSectionsDetector import CMSectionsDetector
 from app.metadata.MetadataAnalyzer import MetadataAnalyzer
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.models.Channel import Channel
+from app.models.CMAnalysisRun import CMAnalysisRun
 from app.models.RecordedProgram import RecordedProgram
 from app.models.RecordedVideo import RecordedVideo
 from app.streams.VideoSegmentPlanner import VideoSegmentPlanner
@@ -168,12 +170,32 @@ class RecordedScanTask:
             return
         self._is_running = True
 
-        # 前回のサーバー終了時に CM 解析が中断されていた場合、実行中表示が残らないように未解析へ戻す
-        interrupted_analysis_count = await RecordedVideo.filter(cm_analysis_status='Analyzing').update(
-            cm_analysis_status='Unanalyzed',
+        # 前回のサーバー終了時に CM 解析が中断されていた場合、実行中表示と履歴が残らないよう状態を確定する
+        ## 以前の正常結果が残っている録画は Completed、それ以外は Unanalyzed へ戻す
+        interrupted_videos = await RecordedVideo.filter(cm_analysis_status='Analyzing')
+        for interrupted_video in interrupted_videos:
+            interrupted_video.cm_analysis_status = \
+                'Completed' if interrupted_video.cm_sections is not None else 'Unanalyzed'
+            interrupted_video.cm_analysis_error = None
+            await interrupted_video.save(update_fields=['cm_analysis_status', 'cm_analysis_error'])
+        interrupted_analysis_count = len(interrupted_videos)
+
+        # 解析履歴側は Canceled として残し、サーバー再起動で中断した事実を API から確認できるようにする
+        interrupted_at = datetime.now(tz=JST)
+        interrupted_run_count = await CMAnalysisRun.filter(status='Analyzing').update(
+            status='Canceled',
+            error=schemas.CMAnalysisError(
+                stage='Canceled',
+                message='CM analysis was interrupted by a server restart.',
+                exit_code=None,
+                detail=None,
+            ),
+            completed_at=interrupted_at,
         )
         if interrupted_analysis_count > 0:
             logging.info(f'Reset {interrupted_analysis_count} interrupted CM analysis status entries.')
+        if interrupted_run_count > 0:
+            logging.info(f'Canceled {interrupted_run_count} interrupted CM analysis history entries.')
 
         # バックグラウンドタスクとして実行
         self._task = asyncio.create_task(self.run())
@@ -1002,9 +1024,13 @@ class RecordedScanTask:
             ## 新規録画と同じ空状態へ戻し、次回再生時に現在のファイルからオンデマンドで解決する
             db_recorded_video.key_frames = []
             db_recorded_video.segment_map = []
-            # この時点では CM 区間情報は未解析なので、明示的に未解析を表す None を設定する (デフォルトで None だが念のため)
-            # 「解析したが CM 区間がなかった/検出に失敗した」場合、CMSectionsDetector 側で [] が設定される
+            # ファイル本体が変わった場合、以前の CM 区間は別内容の可能性があるため未解析状態へ戻す
+            # 正常に解析して CM がなかった場合だけ CMSectionsDetector 側で [] が設定される
             db_recorded_video.cm_analysis_status = 'Unanalyzed'
+            db_recorded_video.cm_analysis_error = None
+            db_recorded_video.cm_analysis_started_at = None
+            db_recorded_video.cm_analysis_completed_at = None
+            db_recorded_video.cm_analysis_elapsed_time = None
             db_recorded_video.cm_sections = None
             await db_recorded_video.save()
 
@@ -1034,7 +1060,7 @@ class RecordedScanTask:
             async with ProcessLimiter.getSemaphore('RecordedScanTask'):
                 # DriveIOLimiter で同一 HDD に対してのバックグラウンドタスクの同時実行数を原則1セッションに制限
                 async with DriveIOLimiter.getSemaphore(file_path):
-                    background_tasks = [
+                    background_tasks: list[Awaitable[object]] = [
                         # シークバー用サムネイルとリスト表示用の代表サムネイルの両方を生成
                         ThumbnailGenerator.fromRecordedProgram(recorded_program).generateAndSave(),
                     ]

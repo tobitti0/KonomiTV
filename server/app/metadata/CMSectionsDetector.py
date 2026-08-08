@@ -5,14 +5,73 @@ import asyncio
 import pathlib
 import tempfile
 import time
+from datetime import datetime
+from typing import Literal
 
 import anyio
 import typer
 
 from app import logging, schemas
 from app.config import LoadConfig
-from app.constants import CM_ANALYZER_DIR, CM_ANALYZER_LOGO_DIR
+from app.constants import CM_ANALYZER_DIR, CM_ANALYZER_LOGO_DIR, JST
+from app.models.CMAnalysisRun import CMAnalysisRun
 from app.models.RecordedVideo import RecordedVideo
+
+
+class CMAnalysisFailure(Exception):
+    """
+    CM 解析の失敗工程と外部コマンドの診断情報を上位へ伝える例外
+    """
+
+    def __init__(
+        self,
+        stage: Literal['Preparation', 'ChapterFile', 'ChapterEXE', 'LogoFrame', 'JoinLogoSCP', 'DTVIndex', 'Unknown'],
+        message: str,
+        exit_code: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """
+        CM 解析失敗例外を初期化する
+
+        Args:
+            stage (Literal): 失敗した工程
+            message (str): ユーザーへ表示できる簡潔な説明
+            exit_code (int | None): 外部コマンドの終了コード
+            detail (str | None): 標準エラーなどの診断情報
+        """
+
+        super().__init__(message)
+        # API と解析履歴へ保存する失敗工程
+        self.stage: Literal[
+            'Preparation',
+            'ChapterFile',
+            'ChapterEXE',
+            'LogoFrame',
+            'JoinLogoSCP',
+            'DTVIndex',
+            'Unknown',
+        ] = stage
+        # UI でもそのまま表示できる、ファイルパスを含まない簡潔な説明
+        self.message = message
+        # 外部コマンド以外の失敗では None になる終了コード
+        self.exit_code = exit_code
+        # 外部コマンドの標準エラー末尾など、管理者向けの診断情報
+        self.detail = detail
+
+    def toError(self) -> schemas.CMAnalysisError:
+        """
+        DB と API で共通利用するエラー情報へ変換する
+
+        Returns:
+            schemas.CMAnalysisError: 解析失敗情報
+        """
+
+        return schemas.CMAnalysisError(
+            stage=self.stage,
+            message=self.message,
+            exit_code=self.exit_code,
+            detail=self.detail,
+        )
 
 
 class CMSectionsDetector:
@@ -21,6 +80,11 @@ class CMSectionsDetector:
     録画ファイルと同じファイル名で .chapter.txt が保存されていればそこから CM 区間情報を取得し、
     .chapter.txt が存在しない場合は自前で CM 区間を検出する
     """
+
+    # 同じ録画ファイルが録画完了時の自動解析と API から同時に解析されないよう直列化する
+    __file_locks: dict[str, asyncio.Lock] = {}
+    # 同じチャンネルの logoframe が LGD の世代番号と latest ファイルを同時更新しないよう直列化する
+    __logo_locks: dict[str, asyncio.Lock] = {}
 
     def __init__(
         self,
@@ -53,37 +117,102 @@ class CMSectionsDetector:
         self.service_id = service_id
 
 
-    async def detectAndSave(self) -> None:
+    async def detectAndSave(
+        self,
+        trigger: Literal['Automatic', 'Manual', 'Batch'] = 'Automatic',
+        force: bool = False,
+    ) -> Literal['Completed', 'Failed']:
         """
         録画ファイルの CM 区間を検出し、データベースに保存する
+
+        Args:
+            trigger (Literal): 解析を開始した契機
+            force (bool): 既存チャプターファイルを使わず解析ツールを再実行するかどうか
+
+        Returns:
+            Literal['Completed', 'Failed']: 解析の終了状態
         """
 
-        start_time = time.time()
+        # 同一ファイルを複数経路から解析すると、同じサイドカーファイルを同時に更新してしまう
+        # ファイル単位のロックは KonomiTV サーバープロセス内の重複実行だけを抑止する
+        file_lock = self.__file_locks.setdefault(str(self.file_path), asyncio.Lock())
+        async with file_lock:
+            return await self.__detectAndSave(trigger, force)
+
+
+    async def __detectAndSave(
+        self,
+        trigger: Literal['Automatic', 'Manual', 'Batch'],
+        force: bool,
+    ) -> Literal['Completed', 'Failed']:
+        """
+        ファイル単位の排他制御を取得した状態で CM 区間を解析する
+
+        Args:
+            trigger (Literal): 解析を開始した契機
+            force (bool): 既存チャプターファイルを使わず解析ツールを再実行するかどうか
+
+        Returns:
+            Literal['Completed', 'Failed']: 解析の終了状態
+        """
+
+        started_at = datetime.now(tz=JST)
+        start_time = time.perf_counter()
         logging.info(f'{self.file_path}: Detecting CM sections...')
-        db_recorded_video: RecordedVideo | None = None
-        analysis_completed = False
+        db_recorded_video = await RecordedVideo.get_or_none(file_path=str(self.file_path))
+        db_analysis_run: CMAnalysisRun | None = None
+        stage_results: list[schemas.CMAnalysisStageResult] = []
+        previous_status: Literal['Unanalyzed', 'Analyzing', 'Completed', 'Failed'] | None = None
+        previous_error: schemas.CMAnalysisError | None = None
         try:
-            # 解析開始直後に状態を保存し、UI から実行中であることを判別できるようにする
-            db_recorded_video = await RecordedVideo.get_or_none(file_path=str(self.file_path))
+            # 解析開始直後に状態と履歴を保存し、UI と API から実行中であることを判別できるようにする
             if db_recorded_video is not None:
+                previous_status = db_recorded_video.cm_analysis_status
+                previous_error = db_recorded_video.cm_analysis_error
                 db_recorded_video.cm_analysis_status = 'Analyzing'
-                await db_recorded_video.save(update_fields=['cm_analysis_status'])
+                db_recorded_video.cm_analysis_error = None
+                db_recorded_video.cm_analysis_started_at = started_at
+                db_recorded_video.cm_analysis_completed_at = None
+                db_recorded_video.cm_analysis_elapsed_time = None
+                await db_recorded_video.save(update_fields=[
+                    'cm_analysis_status',
+                    'cm_analysis_error',
+                    'cm_analysis_started_at',
+                    'cm_analysis_completed_at',
+                    'cm_analysis_elapsed_time',
+                ])
+                db_analysis_run = await CMAnalysisRun.create(
+                    recorded_video=db_recorded_video,
+                    status='Analyzing',
+                    trigger=trigger,
+                    stage_results=[],
+                    started_at=started_at,
+                )
 
             # 録画ファイルに対応するチャプターファイル (.chapter.txt) がもしあれば解析し、CM 区間情報を取得する
             ## 自前で解析すると計算コストが高いので、もしチャプターファイルがあればそれを優先的に使う
             ## .chapter.txt は Amatsukaze でエンコードした際に設定次第で自動生成される
-            cm_sections = await self.__detectFromChapterFile()
+            chapter_start_time = time.perf_counter()
+            chapter_file_path = self.file_path.with_name(f'{self.file_path.stem}.chapter.txt')
+            chapter_file_exists = await chapter_file_path.exists()
+            cm_sections = None if force is True else await self.__detectFromChapterFile(chapter_file_path)
+            stage_results.append(schemas.CMAnalysisStageResult(
+                stage='ChapterFile',
+                status=(
+                    'Skipped' if force is True else
+                    ('Completed' if cm_sections is not None else ('Failed' if chapter_file_exists is True else 'Skipped'))
+                ),
+                exit_code=None,
+                elapsed_time=time.perf_counter() - chapter_start_time,
+                detail=(
+                    'A full reanalysis was requested.' if force is True else
+                    (None if cm_sections is not None or chapter_file_exists is False else 'The chapter file could not be parsed.')
+                ),
+            ))
 
             # チャプターファイルが存在しない場合、join_logo_scp を使って自前で解析を試みる
             if cm_sections is None:
-                cm_sections = await self.__detectWithJLS()
-
-            # 自前でも解析できなかった（解析に失敗した）or CM 区間が1つも検出されなかった場合、
-            # バックグラウンド解析処理が再度実行された際の再解析を回避するために [] を設定する
-            ## [] は解析したが CM 区間がなかった/検出に失敗したことを表す
-            ## CM 区間解析はかなり計算コストが高い処理のため、一度解析に失敗した録画ファイルは再解析しない
-            if cm_sections is None:
-                cm_sections = []
+                cm_sections = await self.__detectWithJLS(stage_results)
 
             # 検出結果をログに出力
             for cm_section in cm_sections:
@@ -91,37 +220,177 @@ class CMSectionsDetector:
 
             # 検出結果をデータベースに保存
             if db_recorded_video is not None:
+                completed_at = datetime.now(tz=JST)
+                elapsed_time = time.perf_counter() - start_time
                 # CM 区間情報と解析完了状態を同時に更新する
-                # 検出できなかった場合も必ず [] を設定する
+                # 正常に解析して CM がなかった場合だけ [] を設定し、失敗とは明確に区別する
                 db_recorded_video.cm_sections = cm_sections
                 db_recorded_video.cm_analysis_status = 'Completed'
-                await db_recorded_video.save(update_fields=['cm_sections', 'cm_analysis_status'])
-                analysis_completed = True
+                db_recorded_video.cm_analysis_error = None
+                db_recorded_video.cm_analysis_completed_at = completed_at
+                db_recorded_video.cm_analysis_elapsed_time = elapsed_time
+                await db_recorded_video.save(update_fields=[
+                    'cm_sections',
+                    'cm_analysis_status',
+                    'cm_analysis_error',
+                    'cm_analysis_completed_at',
+                    'cm_analysis_elapsed_time',
+                ])
+                assert db_analysis_run is not None
+                db_analysis_run.status = 'Completed'
+                db_analysis_run.cm_sections = cm_sections
+                db_analysis_run.stage_results = stage_results
+                db_analysis_run.completed_at = completed_at
+                db_analysis_run.elapsed_time = elapsed_time
+                await db_analysis_run.save(update_fields=[
+                    'status',
+                    'cm_sections',
+                    'stage_results',
+                    'completed_at',
+                    'elapsed_time',
+                ])
                 if len(cm_sections) > 0:
-                    logging.info(f'{self.file_path}: Saved {len(cm_sections)} CM sections. ({time.time() - start_time:.2f} sec)')
+                    logging.info(f'{self.file_path}: Saved {len(cm_sections)} CM sections. ({elapsed_time:.2f} sec)')
                 else:
-                    logging.info(f'{self.file_path}: No CM sections detected. ({time.time() - start_time:.2f} sec)')
+                    logging.info(f'{self.file_path}: No CM sections detected. ({elapsed_time:.2f} sec)')
             else:
                 logging.warning(f'{self.file_path}: RecordedVideo record not found.')
+            return 'Completed'
 
+        except asyncio.CancelledError:
+            # API からのキャンセルやサーバー終了時は失敗件数へ含めず、以前の表示状態へ戻す
+            completed_at = datetime.now(tz=JST)
+            elapsed_time = time.perf_counter() - start_time
+            canceled_error = schemas.CMAnalysisError(
+                stage='Canceled',
+                message='CM analysis was canceled.',
+                exit_code=None,
+                detail=None,
+            )
+            if db_recorded_video is not None:
+                assert previous_status is not None
+                db_recorded_video.cm_analysis_status = previous_status
+                db_recorded_video.cm_analysis_error = previous_error
+                db_recorded_video.cm_analysis_completed_at = completed_at
+                db_recorded_video.cm_analysis_elapsed_time = elapsed_time
+                await db_recorded_video.save(update_fields=[
+                    'cm_analysis_status',
+                    'cm_analysis_error',
+                    'cm_analysis_completed_at',
+                    'cm_analysis_elapsed_time',
+                ])
+            if db_analysis_run is not None:
+                db_analysis_run.status = 'Canceled'
+                db_analysis_run.stage_results = stage_results
+                db_analysis_run.error = canceled_error
+                db_analysis_run.completed_at = completed_at
+                db_analysis_run.elapsed_time = elapsed_time
+                await db_analysis_run.save(update_fields=[
+                    'status',
+                    'stage_results',
+                    'error',
+                    'completed_at',
+                    'elapsed_time',
+                ])
+            raise
+        except CMAnalysisFailure as ex:
+            return await self.__saveFailure(
+                ex.toError(),
+                stage_results,
+                db_recorded_video,
+                db_analysis_run,
+                start_time,
+            )
         except Exception as ex:
             logging.error(f'{self.file_path}: Error saving CM sections to DB:', exc_info=ex)
-        finally:
-            # 解析失敗やサーバー終了による中断時は、再解析できる未解析状態へ戻す
-            if db_recorded_video is not None and analysis_completed is False:
-                try:
-                    db_recorded_video.cm_analysis_status = 'Unanalyzed'
-                    await db_recorded_video.save(update_fields=['cm_analysis_status'])
-                except Exception as ex:
-                    logging.error(f'{self.file_path}: Error resetting CM analysis status:', exc_info=ex)
+            return await self.__saveFailure(
+                schemas.CMAnalysisError(
+                    stage='Unknown',
+                    message='An unexpected error occurred during CM analysis.',
+                    exit_code=None,
+                    detail=str(ex)[-4000:] or None,
+                ),
+                stage_results,
+                db_recorded_video,
+                db_analysis_run,
+                start_time,
+            )
 
 
-    async def __detectWithJLS(self) -> list[schemas.CMSection] | None:
+    async def __saveFailure(
+        self,
+        error: schemas.CMAnalysisError,
+        stage_results: list[schemas.CMAnalysisStageResult],
+        db_recorded_video: RecordedVideo | None,
+        db_analysis_run: CMAnalysisRun | None,
+        start_time: float,
+    ) -> Literal['Failed']:
+        """
+        解析失敗を録画情報と解析履歴へ保存する
+
+        Args:
+            error (schemas.CMAnalysisError): 保存する失敗情報
+            stage_results (list[schemas.CMAnalysisStageResult]): 失敗までに実行した工程
+            db_recorded_video (RecordedVideo | None): 解析対象の録画ファイルレコード
+            db_analysis_run (CMAnalysisRun | None): 今回の解析履歴レコード
+            start_time (float): perf_counter() で取得した開始時刻
+
+        Returns:
+            Literal['Failed']: 解析失敗状態
+        """
+
+        completed_at = datetime.now(tz=JST)
+        elapsed_time = time.perf_counter() - start_time
+        logging.error(
+            f'{self.file_path}: CM analysis failed at {error["stage"]}: '
+            f'{error["message"]} ({elapsed_time:.2f} sec)'
+        )
+        if db_recorded_video is not None:
+            # 以前の正常な cm_sections は消さず、再生画面で引き続き利用できるようにする
+            # 通常ユーザーも取得できる録画 API には、ファイルパスを含み得る診断詳細を公開しない
+            db_recorded_video.cm_analysis_status = 'Failed'
+            db_recorded_video.cm_analysis_error = schemas.CMAnalysisError(
+                stage=error['stage'],
+                message=error['message'],
+                exit_code=error['exit_code'],
+                detail=None,
+            )
+            db_recorded_video.cm_analysis_completed_at = completed_at
+            db_recorded_video.cm_analysis_elapsed_time = elapsed_time
+            await db_recorded_video.save(update_fields=[
+                'cm_analysis_status',
+                'cm_analysis_error',
+                'cm_analysis_completed_at',
+                'cm_analysis_elapsed_time',
+            ])
+        if db_analysis_run is not None:
+            db_analysis_run.status = 'Failed'
+            db_analysis_run.stage_results = stage_results
+            db_analysis_run.error = error
+            db_analysis_run.completed_at = completed_at
+            db_analysis_run.elapsed_time = elapsed_time
+            await db_analysis_run.save(update_fields=[
+                'status',
+                'stage_results',
+                'error',
+                'completed_at',
+                'elapsed_time',
+            ])
+        return 'Failed'
+
+
+    async def __detectWithJLS(
+        self,
+        stage_results: list[schemas.CMAnalysisStageResult],
+    ) -> list[schemas.CMSection]:
         """
         録画ファイルの CM 区間を join_logo_scp (with chapter_exe) を使って解析する
 
+        Args:
+            stage_results (list[schemas.CMAnalysisStageResult]): 工程別の診断情報を追加するリスト
+
         Returns:
-            list[schemas.CMSection] | None: 解析に成功した場合は CM 区間のリストを返す
+            list[schemas.CMSection]: 解析に成功した場合は CM 区間のリストを返す
         """
 
         chapter_exe_path = CM_ANALYZER_DIR / 'chapter_exe'
@@ -133,9 +402,13 @@ class CMSectionsDetector:
         # chapter_exe・dtvindex・join_logo_scp・標準解析スクリプトが揃っていなければ解析できない
         # logoframe は LGD がない場合も含めて任意なので、必須ツールには含めない
         required_paths = [chapter_exe_path, dtvindex_path, join_logo_scp_path, jls_command_path]
-        if any(path.is_file() is False for path in required_paths):
-            logging.warning(f'{self.file_path}: CM analyzer tools are not installed. Skipping JLS analysis.')
-            return None
+        missing_paths = [path.name for path in required_paths if path.is_file() is False]
+        if missing_paths:
+            raise CMAnalysisFailure(
+                'Preparation',
+                'Required CM analyzer tools are not installed.',
+                detail=', '.join(missing_paths),
+            )
 
         # 各ツールの中間ファイルは録画フォルダへ残さず、一時ディレクトリ内だけで管理する
         with tempfile.TemporaryDirectory(prefix='konomitv-cm-analysis-') as temporary_directory:
@@ -148,18 +421,27 @@ class CMSectionsDetector:
             chapter_file_path = self.file_path.with_name(f'{self.file_path.stem}.chapter.txt')
 
             # まず chapter_exe で無音区間とシーンチェンジを検出する
-            chapter_return_code, _, chapter_stderr = await self.__runCommand([
-                str(chapter_exe_path),
-                '-v', str(self.file_path),
-                '--serial',
-                '-o', str(chapter_output_path),
-            ])
+            chapter_return_code, _, chapter_stderr = await self.__runStage(
+                'ChapterEXE',
+                [
+                    str(chapter_exe_path),
+                    '-v', str(self.file_path),
+                    '--serial',
+                    '-o', str(chapter_output_path),
+                ],
+                stage_results,
+            )
             if chapter_return_code != 0 or chapter_output_path.is_file() is False:
-                logging.error(
-                    f'{self.file_path}: chapter_exe failed with exit code {chapter_return_code}: '
-                    f'{chapter_stderr[-4000:]}'
+                self.__markLastStageFailed(
+                    stage_results,
+                    'chapter_exe did not produce its expected output file.',
                 )
-                return None
+                raise CMAnalysisFailure(
+                    'ChapterEXE',
+                    'chapter_exe failed.',
+                    exit_code=chapter_return_code,
+                    detail=chapter_stderr[-4000:] or None,
+                )
 
             # 録画ファイルのサイドカーまたはチャンネル別ディレクトリに既存 LGD があればそれを優先する
             # 既存 LGD がなくてもサービス ID が分かる場合は、logoframe に検出用 LGD の生成と世代管理を委ねる
@@ -186,13 +468,34 @@ class CMSectionsDetector:
 
             if logoframe_command is not None:
                 logoframe_command.extend(['-oa', str(logo_output_path)])
-                logo_return_code, _, logo_stderr = await self.__runCommand(logoframe_command)
+                # 同じサービス ID の自動生成 LGD は共通の世代管理ファイルを更新するため、
+                # ファイル単位の並列解析中もロゴ工程だけはチャンネルごとに直列化する
+                logo_lock_key = str(self.service_id) if self.service_id is not None else str(logo_file_path)
+                logo_lock = self.__logo_locks.setdefault(logo_lock_key, asyncio.Lock())
+                async with logo_lock:
+                    logo_return_code, _, logo_stderr = await self.__runStage(
+                        'LogoFrame',
+                        logoframe_command,
+                        stage_results,
+                    )
                 if logo_return_code != 0 or logo_output_path.is_file() is False:
+                    self.__markLastStageFailed(
+                        stage_results,
+                        'logoframe did not produce logo interval data; analysis continued without it.',
+                    )
                     logging.warning(
                         f'{self.file_path}: logoframe failed with exit code {logo_return_code}; '
                         f'continuing without logo data: {logo_stderr[-4000:]}'
                     )
                     logo_output_path.unlink(missing_ok=True)
+            else:
+                stage_results.append(schemas.CMAnalysisStageResult(
+                    stage='LogoFrame',
+                    status='Skipped',
+                    exit_code=None,
+                    elapsed_time=0.0,
+                    detail='No usable logo file or service ID was available.',
+                ))
 
             # join_logo_scp は chapter_exe の結果を必須入力とし、logoframe の結果が得られた場合だけ追加する
             join_logo_scp_command = [
@@ -207,37 +510,121 @@ class CMSectionsDetector:
             if logo_output_path.is_file() is True:
                 join_logo_scp_command[1:1] = ['-inlogo', str(logo_output_path)]
 
-            join_return_code, _, join_stderr = await self.__runCommand(join_logo_scp_command)
+            join_return_code, _, join_stderr = await self.__runStage(
+                'JoinLogoSCP',
+                join_logo_scp_command,
+                stage_results,
+            )
             if (
                 join_return_code != 0 or
                 trim_output_path.is_file() is False or
                 jls_detail_output_path.is_file() is False
             ):
-                logging.error(
-                    f'{self.file_path}: join_logo_scp failed with exit code {join_return_code}: '
-                    f'{join_stderr[-4000:]}'
+                self.__markLastStageFailed(
+                    stage_results,
+                    'join_logo_scp did not produce its expected output files.',
                 )
-                return None
+                raise CMAnalysisFailure(
+                    'JoinLogoSCP',
+                    'join_logo_scp failed.',
+                    exit_code=join_return_code,
+                    detail=join_stderr[-4000:] or None,
+                )
 
             # Trim の解釈とフレーム PTS からの時刻変換は dtvindex に集約し、
             # 他のプレイヤーや編集ソフトでも扱える OGM 形式の一般的なチャプターファイルとして保存する
-            dtvindex_return_code, _, dtvindex_stderr = await self.__runCommand([
-                str(dtvindex_path),
-                'trim-chapters',
-                str(self.file_path),
-                str(index_file_path),
-                str(trim_output_path),
-                '--jls', str(jls_detail_output_path),
-                '-o', str(chapter_file_path),
-            ])
+            dtvindex_return_code, _, dtvindex_stderr = await self.__runStage(
+                'DTVIndex',
+                [
+                    str(dtvindex_path),
+                    'trim-chapters',
+                    str(self.file_path),
+                    str(index_file_path),
+                    str(trim_output_path),
+                    '--jls', str(jls_detail_output_path),
+                    '-o', str(chapter_file_path),
+                ],
+                stage_results,
+            )
             if dtvindex_return_code != 0 or await chapter_file_path.is_file() is False:
-                logging.error(
-                    f'{self.file_path}: dtvindex trim-chapters failed with exit code {dtvindex_return_code}: '
-                    f'{dtvindex_stderr[-4000:]}'
+                self.__markLastStageFailed(
+                    stage_results,
+                    'dtvindex did not produce a chapter file.',
                 )
-                return None
+                raise CMAnalysisFailure(
+                    'DTVIndex',
+                    'dtvindex trim-chapters failed.',
+                    exit_code=dtvindex_return_code,
+                    detail=dtvindex_stderr[-4000:] or None,
+                )
 
-            return await self.__detectFromChapterFile(chapter_file_path)
+            cm_sections = await self.__detectFromChapterFile(chapter_file_path)
+            if cm_sections is None:
+                self.__markLastStageFailed(
+                    stage_results,
+                    'The generated chapter file could not be parsed.',
+                )
+                raise CMAnalysisFailure(
+                    'DTVIndex',
+                    'The generated chapter file is invalid.',
+                    exit_code=dtvindex_return_code,
+                    detail=str(chapter_file_path),
+                )
+            return cm_sections
+
+
+    async def __runStage(
+        self,
+        stage: Literal['ChapterEXE', 'LogoFrame', 'JoinLogoSCP', 'DTVIndex'],
+        command: list[str],
+        stage_results: list[schemas.CMAnalysisStageResult],
+    ) -> tuple[int, str, str]:
+        """
+        外部コマンドを実行し、終了コードと所要時間を解析履歴へ追加する
+
+        Args:
+            stage (Literal): 実行する解析工程
+            command (list[str]): 実行ファイルを先頭にした引数リスト
+            stage_results (list[schemas.CMAnalysisStageResult]): 工程別の診断情報を追加するリスト
+
+        Returns:
+            tuple[int, str, str]: 終了コード・標準出力・標準エラー
+        """
+
+        start_time = time.perf_counter()
+        return_code, stdout, stderr = await self.__runCommand(command)
+        stage_results.append(schemas.CMAnalysisStageResult(
+            stage=stage,
+            status='Completed' if return_code == 0 else 'Failed',
+            exit_code=return_code,
+            elapsed_time=time.perf_counter() - start_time,
+            # 成功時もロゴ生成サンプル数などの有用な情報が標準エラーへ出力されるため末尾を保存する
+            detail=stderr[-4000:] or None,
+        ))
+        return return_code, stdout, stderr
+
+
+    @staticmethod
+    def __markLastStageFailed(
+        stage_results: list[schemas.CMAnalysisStageResult],
+        detail: str,
+    ) -> None:
+        """
+        終了コードは成功でも必要な出力が欠けていた工程を失敗へ修正する
+
+        Args:
+            stage_results (list[schemas.CMAnalysisStageResult]): 工程別の診断情報
+            detail (str): 出力ファイル不足などの追加説明
+
+        Returns:
+            None
+        """
+
+        if not stage_results:
+            return
+        stage_results[-1]['status'] = 'Failed'
+        previous_detail = stage_results[-1]['detail']
+        stage_results[-1]['detail'] = f'{detail}\n{previous_detail}' if previous_detail else detail
 
 
     async def __findLogoFile(self) -> pathlib.Path | None:
@@ -291,7 +678,12 @@ class CMSectionsDetector:
             # サーバー終了時などに親タスクがキャンセルされた場合、重い解析プロセスだけが残らないよう確実に終了する
             if process.returncode is None:
                 process.terminate()
-                await process.wait()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except TimeoutError:
+                    # SIGTERM を処理しない外部ツールでもキャンセル完了を待ち続けないよう、最後は強制終了する
+                    process.kill()
+                    await process.wait()
             raise
 
         stdout = stdout_bytes.decode('utf-8', errors='replace')

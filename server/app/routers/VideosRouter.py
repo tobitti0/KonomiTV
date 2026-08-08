@@ -27,9 +27,11 @@ from app.constants import STATIC_DIR, THUMBNAILS_DIR
 from app.extensions.box_streaming.BoxRandomAccessFile import IsBoxOnlyRecording
 from app.extensions.box_streaming.BoxRecordingCatalog import BoxRecordingCatalog
 from app.extensions.box_streaming.BoxStreamsRouter import CreateBoxFileStreamingResponse
+from app.metadata.CMAnalysisManager import CM_ANALYSIS_MANAGER
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.metadata.TSInfoAnalyzer import TSInfoAnalyzer
+from app.models.CMAnalysisRun import CMAnalysisRun
 from app.models.RecordedProgram import RecordedProgram
 from app.models.User import User
 from app.routers.UsersRouter import GetCurrentAdminUser
@@ -54,6 +56,14 @@ async def ConvertRowToRecordedProgram(row: dict[str, Any]) -> schemas.RecordedPr
     cm_sections: list[schemas.CMSection] | None = None
     if row['cm_sections'] is not None:
         cm_sections = json.loads(row['cm_sections'])
+
+    # cm_analysis_error は通常 None で小さいため、CM 区間と同じく通常通りパースする
+    cm_analysis_error: schemas.CMAnalysisError | None = None
+    if row['cm_analysis_error'] is not None:
+        if isinstance(row['cm_analysis_error'], str):
+            cm_analysis_error = json.loads(row['cm_analysis_error'])
+        else:
+            cm_analysis_error = row['cm_analysis_error']
 
     # thumbnail_info は小さいので、通常通りパースする
     thumbnail_info: schemas.ThumbnailInfo | None = None
@@ -90,6 +100,10 @@ async def ConvertRowToRecordedProgram(row: dict[str, Any]) -> schemas.RecordedPr
         'secondary_audio_channel': row['secondary_audio_channel'],
         'secondary_audio_sampling_rate': row['secondary_audio_sampling_rate'],
         'cm_analysis_status': row['cm_analysis_status'],
+        'cm_analysis_error': cm_analysis_error,
+        'cm_analysis_started_at': row['cm_analysis_started_at'],
+        'cm_analysis_completed_at': row['cm_analysis_completed_at'],
+        'cm_analysis_elapsed_time': row['cm_analysis_elapsed_time'],
         'cm_sections': cm_sections,
         'thumbnail_info': thumbnail_info,
         'created_at': row['rv_created_at'],
@@ -389,6 +403,10 @@ async def VideosAPI(
             rv.secondary_audio_channel,
             rv.secondary_audio_sampling_rate,
             rv.cm_analysis_status,
+            rv.cm_analysis_error,
+            rv.cm_analysis_started_at,
+            rv.cm_analysis_completed_at,
+            rv.cm_analysis_elapsed_time,
             rv.cm_sections,
             rv.thumbnail_info,
             rv.created_at AS rv_created_at,
@@ -617,6 +635,10 @@ async def VideosSearchAPI(
             rv.secondary_audio_channel,
             rv.secondary_audio_sampling_rate,
             rv.cm_analysis_status,
+            rv.cm_analysis_error,
+            rv.cm_analysis_started_at,
+            rv.cm_analysis_completed_at,
+            rv.cm_analysis_elapsed_time,
             rv.cm_sections,
             rv.thumbnail_info,
             rv.created_at AS rv_created_at,
@@ -833,6 +855,74 @@ async def VideoJikkyoCommentsAPI(
         comments = [],
         detail = 'チャンネル情報または録画開始時刻/録画終了時刻の情報がない録画番組です。',
     )
+
+
+@router.post(
+    '/{video_id}/cm-analysis',
+    summary = '録画番組 CM 区間解析開始 API',
+    status_code = status.HTTP_202_ACCEPTED,
+)
+async def VideoCMAnalysisStartAPI(
+    recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+) -> schemas.CMAnalysisJob:
+    """
+    指定された録画番組だけを対象に、CM 区間解析をバックグラウンドで開始する。<br>
+    chapter_exe・logoframe・join_logo_scp・dtvindex の一連の処理を実行し、正常終了時だけ CM 区間を更新する。<br>
+    JWT エンコードされたアクセストークンが設定され、かつ管理者アカウントでないと実行できない。
+    """
+
+    # Depends() による管理者確認を明示的に残しつつ、処理自体ではユーザー情報を利用しない
+    _ = current_user
+    # CM 解析ツールは録画完了済み MPEG-TS のみを入力として扱える
+    if (
+        recorded_program.recorded_video.status != 'Recorded' or
+        recorded_program.recorded_video.container_format != 'MPEG-TS'
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='CM analysis only supports recorded MPEG-TS files',
+        )
+    try:
+        return await CM_ANALYSIS_MANAGER.startAnalysis(
+            schemas.CMAnalysisBatchRequest(
+                target='All',
+                recorded_program_ids=[recorded_program.id],
+                concurrency=1,
+                force=True,
+            ),
+            trigger='Manual',
+        )
+    except RuntimeError as ex:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(ex),
+        ) from ex
+
+
+@router.get(
+    '/{video_id}/cm-analysis/runs',
+    summary = '録画番組 CM 区間解析履歴取得 API',
+)
+async def VideoCMAnalysisRunsAPI(
+    recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[schemas.CMAnalysisRun]:
+    """
+    指定された録画番組の CM 区間解析履歴を新しい順に取得する。<br>
+    外部コマンドの診断情報を含むため、管理者アカウントでないと取得できない。
+    """
+
+    # Depends() による管理者確認を明示的に残しつつ、処理自体ではユーザー情報を利用しない
+    _ = current_user
+    runs = await CMAnalysisRun.filter(recorded_video_id=recorded_program.recorded_video.id) \
+        .order_by('-created_at') \
+        .limit(limit)
+    return [
+        schemas.CMAnalysisRun.model_validate(run, from_attributes=True)
+        for run in runs
+    ]
 
 
 @router.post(

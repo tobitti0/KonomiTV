@@ -1,4 +1,6 @@
 
+import type { ICMAnalysisJob } from '@/services/Maintenance';
+
 import APIClient from  '@/services/APIClient';
 import { IChannel } from '@/services/Channels';
 import { CommentUtils } from '@/utils';
@@ -38,9 +40,46 @@ export interface IRecordedVideo {
     secondary_audio_codec: 'AAC-LC' | null;
     secondary_audio_channel: 'Monaural' | 'Stereo' | '5.1ch' | null;
     secondary_audio_sampling_rate: number | null;
-    cm_analysis_status: 'Unanalyzed' | 'Analyzing' | 'Completed';
+    cm_analysis_status: 'Unanalyzed' | 'Analyzing' | 'Completed' | 'Failed';
+    cm_analysis_error: ICMAnalysisError | null;
+    cm_analysis_started_at: string | null;
+    cm_analysis_completed_at: string | null;
+    cm_analysis_elapsed_time: number | null;
     cm_sections: { start_time: number; end_time: number; }[] | null;
     thumbnail_info: IThumbnailInfo | null;
+    created_at: string;
+    updated_at: string;
+}
+
+/** CM 区間解析の失敗情報 */
+export interface ICMAnalysisError {
+    stage: 'Preparation' | 'ChapterFile' | 'ChapterEXE' | 'LogoFrame' | 'JoinLogoSCP' | 'DTVIndex' | 'Canceled' | 'Unknown';
+    message: string;
+    exit_code: number | null;
+    detail: string | null;
+}
+
+/** CM 区間解析の工程別結果 */
+export interface ICMAnalysisStageResult {
+    stage: 'ChapterFile' | 'ChapterEXE' | 'LogoFrame' | 'JoinLogoSCP' | 'DTVIndex';
+    status: 'Completed' | 'Failed' | 'Skipped';
+    exit_code: number | null;
+    elapsed_time: number;
+    detail: string | null;
+}
+
+/** CM 区間解析の実行履歴 */
+export interface ICMAnalysisRun {
+    id: number;
+    recorded_video_id: number;
+    status: 'Analyzing' | 'Completed' | 'Failed' | 'Canceled';
+    trigger: 'Automatic' | 'Manual' | 'Batch';
+    cm_sections: { start_time: number; end_time: number; }[] | null;
+    stage_results: ICMAnalysisStageResult[];
+    error: ICMAnalysisError | null;
+    started_at: string;
+    completed_at: string | null;
+    elapsed_time: number | null;
     created_at: string;
     updated_at: string;
 }
@@ -102,6 +141,10 @@ export const IRecordedVideoDefault: IRecordedVideo = {
     secondary_audio_channel: null,
     secondary_audio_sampling_rate: null,
     cm_analysis_status: 'Unanalyzed',
+    cm_analysis_error: null,
+    cm_analysis_started_at: null,
+    cm_analysis_completed_at: null,
+    cm_analysis_elapsed_time: null,
     cm_sections: null,
     thumbnail_info: null,
     created_at: '2000-01-01T00:00:00+09:00',
@@ -331,6 +374,48 @@ class Videos {
         }
 
         return true;
+    }
+
+
+    /**
+     * 指定した録画番組の CM 区間解析を開始する
+     * @param video_id 録画番組の ID
+     * @returns 開始後のジョブ状態、または開始に失敗した場合は null
+     */
+    static async startCMAnalysis(video_id: number): Promise<ICMAnalysisJob | null> {
+
+        const response = await APIClient.post<ICMAnalysisJob>(`/videos/${video_id}/cm-analysis`);
+        if (response.type === 'error') {
+            switch (response.data.detail) {
+                case 'CM analysis job is already running':
+                    APIClient.showGenericError(response, '別の CM 区間解析が既に実行中です。');
+                    break;
+                default:
+                    APIClient.showGenericError(response, 'CM 区間解析を開始できませんでした。');
+                    break;
+            }
+            return null;
+        }
+        return response.data;
+    }
+
+
+    /**
+     * 指定した録画番組の CM 区間解析履歴を取得する
+     * @param video_id 録画番組の ID
+     * @param limit 取得する最大件数
+     * @returns 解析履歴、または取得に失敗した場合は null
+     */
+    static async fetchCMAnalysisRuns(video_id: number, limit: number = 20): Promise<ICMAnalysisRun[] | null> {
+
+        const response = await APIClient.get<ICMAnalysisRun[]>(`/videos/${video_id}/cm-analysis/runs`, {
+            params: { limit },
+        });
+        if (response.type === 'error') {
+            APIClient.showGenericError(response, 'CM 区間解析履歴を取得できませんでした。');
+            return null;
+        }
+        return response.data;
     }
 
 

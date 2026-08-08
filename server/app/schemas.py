@@ -13,6 +13,10 @@ from typing_extensions import TypedDict
 from app.utils.TSInformation import TerrestrialRegion
 
 
+# CM 解析を開始した契機
+CMAnalysisTrigger = Literal['Automatic', 'Manual', 'Batch']
+
+
 # 以下に定義する型定義は、必ず以下の例のように、「親モデル」->「子モデル」の順に記述すること！
 # from __future__ import annotations をインポートしているので前方参照について気にする必要はない
 ## 悪い例: ThumbnailImageInfo -> ThumbnailTileInfo -> ThumbnailInfo -> KeyFrame -> CMSection -> RecordedVideo
@@ -170,11 +174,49 @@ class RecordedVideo(PydanticModel):
     secondary_audio_codec: Literal['AAC-LC'] | None = None
     secondary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch'] | None = None
     secondary_audio_sampling_rate: int | None = None
-    cm_analysis_status: Literal['Unanalyzed', 'Analyzing', 'Completed'] = 'Unanalyzed'
+    cm_analysis_status: Literal['Unanalyzed', 'Analyzing', 'Completed', 'Failed'] = 'Unanalyzed'
+    cm_analysis_error: CMAnalysisError | None = None
+    cm_analysis_started_at: datetime | None = None
+    cm_analysis_completed_at: datetime | None = None
+    cm_analysis_elapsed_time: float | None = None
     cm_sections: list[CMSection] | None = None
     thumbnail_info: ThumbnailInfo | None = None
     created_at: datetime
     updated_at: datetime
+
+class CMAnalysisRun(PydanticModel):
+    id: int
+    recorded_video_id: int
+    status: Literal['Analyzing', 'Completed', 'Failed', 'Canceled']
+    trigger: CMAnalysisTrigger
+    cm_sections: list[CMSection] | None
+    stage_results: list[CMAnalysisStageResult]
+    error: CMAnalysisError | None
+    started_at: datetime
+    completed_at: datetime | None
+    elapsed_time: float | None
+    created_at: datetime
+    updated_at: datetime
+
+class CMAnalysisBatchRequest(BaseModel):
+    target: Literal['Unanalyzed', 'Failed', 'UnanalyzedOrFailed', 'All'] = 'UnanalyzedOrFailed'
+    recorded_program_ids: list[int] | None = None
+    genre: str | None = None
+    concurrency: Annotated[int, Field(ge=1, le=4)] = 2
+    force: bool = False
+
+class CMAnalysisJob(BaseModel):
+    status: Literal['Idle', 'Running', 'Canceling', 'Completed', 'Canceled', 'Failed']
+    total: int
+    processed: int
+    succeeded: int
+    failed: int
+    concurrency: int
+    force: bool
+    target: Literal['Unanalyzed', 'Failed', 'UnanalyzedOrFailed', 'All'] | None
+    genre: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
 
 class KeyFrame(TypedDict):
     offset: int
@@ -188,6 +230,19 @@ class SegmentMapEntry(TypedDict):
 class CMSection(TypedDict):
     start_time: float
     end_time: float
+
+class CMAnalysisError(TypedDict):
+    stage: Literal['Preparation', 'ChapterFile', 'ChapterEXE', 'LogoFrame', 'JoinLogoSCP', 'DTVIndex', 'Canceled', 'Unknown']
+    message: str
+    exit_code: int | None
+    detail: str | None
+
+class CMAnalysisStageResult(TypedDict):
+    stage: Literal['ChapterFile', 'ChapterEXE', 'LogoFrame', 'JoinLogoSCP', 'DTVIndex']
+    status: Literal['Completed', 'Failed', 'Skipped']
+    exit_code: int | None
+    elapsed_time: float
+    detail: str | None
 
 class ThumbnailInfo(TypedDict):
     version: int
