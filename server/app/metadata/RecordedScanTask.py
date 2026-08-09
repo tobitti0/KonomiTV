@@ -5,8 +5,9 @@ import asyncio
 import concurrent.futures
 import pathlib
 from collections.abc import Awaitable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import ClassVar, Literal, cast
 
 import anyio
@@ -21,11 +22,14 @@ from app.constants import JST, THUMBNAILS_DIR
 from app.extensions.box_streaming.BoxRecordingCatalog import BoxRecordingCatalog
 from app.metadata.CMSectionsDetector import CMSectionsDetector
 from app.metadata.MetadataAnalyzer import MetadataAnalyzer
+from app.metadata.ProgramTitleParser import ProgramTitleParser
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.models.Channel import Channel
 from app.models.CMAnalysisRun import CMAnalysisRun
 from app.models.RecordedProgram import RecordedProgram
 from app.models.RecordedVideo import RecordedVideo
+from app.models.Series import Series
+from app.models.SeriesBroadcastPeriod import SeriesBroadcastPeriod
 from app.streams.VideoSegmentPlanner import VideoSegmentPlanner
 from app.utils import ShutdownProcessPoolExecutor
 from app.utils.DriveIOLimiter import DriveIOLimiter
@@ -98,6 +102,13 @@ class RecordedScanTask:
     # 継続更新を強制的に完了とする時間 (秒)
     CONTINUOUS_UPDATE_MAX_SECONDS: ClassVar[int] = 86400  # 24時間
 
+    # 同じシリーズ・チャンネルの録画を同一放送期間としてまとめる最大の空白日数
+    ## 1クールと次クールの境界をまたぐ一時的な放送休止はまとめつつ、数年後の再放送などは別期間として扱う
+    SERIES_BROADCAST_PERIOD_MAX_GAP_DAYS: ClassVar[int] = 90
+
+    # シリーズ一括再判定時に一度に取得する録画番組レコード数
+    SERIES_RECLASSIFICATION_BATCH_SIZE: ClassVar[int] = 100
+
     # 既知のハッシュ衝突が発生しうる file_hash の集合
     KNOWN_COLLISION_FILE_HASHES: ClassVar[set[str]] = {
         'd1dd210d6b1312cb342b56d02bd5e651',
@@ -154,6 +165,14 @@ class RecordedScanTask:
         self._file_locks_dict_lock = asyncio.Lock()
         # 録画専用チャンネルの枝番計算と保存を直列化するためのロック
         self._recording_only_channels_lock = asyncio.Lock()
+
+        # 同じシリーズを並行保存した際の Series / SeriesBroadcastPeriod 重複作成を防ぐためのロック
+        ## __resolveSeriesMetadata() から参照され、録画メタデータ保存処理の間だけ保持される
+        self._series_metadata_lock = asyncio.Lock()
+
+        # シリーズ一括再判定中に通常の録画メタデータ保存が割り込まないようにするためのロック
+        ## reclassifySeries() と __saveRecordedMetadataToDB() の双方から参照され、Series 関連レコードの一貫性を保つ
+        self._series_reclassification_lock = asyncio.Lock()
 
         # 初期化済みフラグをセット
         self._initialized = True
@@ -877,6 +896,302 @@ class RecordedScanTask:
         db_channel.is_watchable = channel_schema.is_watchable
 
 
+    async def __resolveSeriesMetadata(
+        self,
+        series_title: str | None,
+        description: str,
+        genres: list[schemas.Genre],
+        start_time: datetime,
+        channel_id: str | None,
+    ) -> tuple[int | None, int | None]:
+        """
+        タイトル解析結果に対応するシリーズと放送期間を作成または更新する。
+
+        Args:
+            series_title (str | None): タイトル解析で取得したシリーズ名。解析に失敗した場合は None。
+            description (str): シリーズの代表情報に利用する番組概要。
+            genres (list[schemas.Genre]): シリーズの代表情報に利用する番組ジャンル。
+            start_time (datetime): シリーズ放送期間の判定に利用する番組開始日時。
+            channel_id (str | None): 録画番組に紐づく保存済みチャンネルの ID。取得できなかった場合は None。
+
+        Returns:
+            tuple[int | None, int | None]: シリーズ ID とシリーズ放送期間 ID。タイトル解析に失敗した場合はいずれも None。
+        """
+
+        # 正規表現に一致しなかった番組はシリーズへ紐付けない
+        if series_title is None or series_title.strip() == '':
+            return (None, None)
+        series_title = series_title.strip()
+
+        # 録画ファイルは並行解析されるため、検索から新規作成までを直列化して重複レコードを防ぐ
+        async with self._series_metadata_lock:
+            db_series = await Series.filter(title=series_title).order_by('id').first()
+            if db_series is None:
+                db_series = Series()
+                db_series.title = series_title
+                db_series.description = description
+                db_series.genres = genres
+            else:
+                # 後から解析精度の高い録画が追加された場合にシリーズの代表情報を改善する
+                ## 解析不能時の既定文で、すでに取得済みの有用な概要を上書きしない
+                if description != '番組概要を取得できませんでした。':
+                    db_series.description = description
+                if len(genres) > 0:
+                    db_series.genres = genres
+
+            # 既存シリーズでも save() して updated_at を更新し、シリーズ一覧を最新録画順に並べられるようにする
+            await db_series.save()
+
+            # チャンネル情報が取得できなかった録画でもシリーズ自体には紐付けるが、放送期間は作成できない
+            if channel_id is None:
+                return (db_series.id, None)
+
+            program_date = start_time.date()
+            max_gap = timedelta(days=self.SERIES_BROADCAST_PERIOD_MAX_GAP_DAYS)
+            db_broadcast_periods = await SeriesBroadcastPeriod.filter(
+                series_id = db_series.id,
+                channel_id = channel_id,
+            ).order_by('start_date')
+
+            # 番組日が既存期間内、または期間の前後90日以内にある候補を抽出する
+            ## 過去録画を順不同で追加して2つの期間がつながる場合があるため、候補は1件に限定しない
+            adjoining_periods = [
+                period for period in db_broadcast_periods
+                if period.start_date - max_gap <= program_date <= period.end_date + max_gap
+            ]
+
+            if len(adjoining_periods) == 0:
+                db_broadcast_period = SeriesBroadcastPeriod()
+                db_broadcast_period.series_id = db_series.id
+                db_broadcast_period.channel_id = channel_id
+                db_broadcast_period.start_date = program_date
+                db_broadcast_period.end_date = program_date
+                await db_broadcast_period.save()
+                return (db_series.id, db_broadcast_period.id)
+
+            # 複数候補がある場合は最初の期間へ統合し、順不同の録画追加でも期間が分断されたままにならないようにする
+            db_broadcast_period = adjoining_periods[0]
+            db_broadcast_period.start_date = min(
+                program_date,
+                *(period.start_date for period in adjoining_periods),
+            )
+            db_broadcast_period.end_date = max(
+                program_date,
+                *(period.end_date for period in adjoining_periods),
+            )
+            await db_broadcast_period.save()
+
+            for merged_period in adjoining_periods[1:]:
+                await RecordedProgram.filter(series_broadcast_period_id=merged_period.id).update(
+                    series_broadcast_period_id = db_broadcast_period.id,
+                )
+                await merged_period.delete()
+
+            return (db_series.id, db_broadcast_period.id)
+
+
+    @staticmethod
+    async def __cleanupOrphanedSeriesMetadata(
+        previous_series_id: int | None,
+        previous_broadcast_period_id: int | None,
+        current_series_id: int | None,
+        current_broadcast_period_id: int | None,
+    ) -> None:
+        """
+        再解析によって参照されなくなったシリーズ情報を削除する。
+
+        Args:
+            previous_series_id (int | None): 再解析前のシリーズ ID。
+            previous_broadcast_period_id (int | None): 再解析前のシリーズ放送期間 ID。
+            current_series_id (int | None): 再解析後のシリーズ ID。
+            current_broadcast_period_id (int | None): 再解析後のシリーズ放送期間 ID。
+
+        Returns:
+            None
+        """
+
+        # 別の期間へ移動した場合、録画が1件も残っていない古い期間を削除する
+        if (
+            previous_broadcast_period_id is not None and
+            previous_broadcast_period_id != current_broadcast_period_id and
+            await RecordedProgram.filter(series_broadcast_period_id=previous_broadcast_period_id).exists() is False
+        ):
+            await SeriesBroadcastPeriod.filter(id=previous_broadcast_period_id).delete()
+
+        # 別のシリーズへ移動した場合、録画が1件も残っていない古いシリーズを削除する
+        ## Series 削除時は残っている SeriesBroadcastPeriod も CASCADE で削除される
+        if (
+            previous_series_id is not None and
+            previous_series_id != current_series_id and
+            await RecordedProgram.filter(series_id=previous_series_id).exists() is False
+        ):
+            await Series.filter(id=previous_series_id).delete()
+
+
+    async def reclassifySeries(self, pattern: str) -> schemas.ProgramTitleReclassificationResult:
+        """
+        DB に保存済みの全録画番組を、指定された正規表現でシリーズへ再分類する。
+        録画ファイルや RecordedVideo にはアクセスせず、CM 区間情報・サムネイル・動画メタデータは変更しない。
+
+        Args:
+            pattern (str): 番組タイトルのシリーズ判定に利用する正規表現。
+
+        Returns:
+            schemas.ProgramTitleReclassificationResult: 全件数・一致件数・不一致件数・変更件数。
+        """
+
+        # API 以外から呼ばれた場合にも不正な正規表現で途中まで更新されないよう、トランザクション開始前に検証する
+        ProgramTitleParser.validatePattern(pattern)
+
+        total_count = 0
+        matched_count = 0
+        unmatched_count = 0
+        changed_count = 0
+        logging.info('Series reclassification has started.')
+
+        # 通常の録画メタデータ保存を一時的に待機させ、全処理を1トランザクションで完結させる
+        ## エラーやサーバー終了が発生した場合は全変更がロールバックされ、半端なシリーズ紐付けが残らない
+        async with self._series_reclassification_lock:
+            async with transactions.in_transaction():
+                last_seen_id = 0
+
+                # 第1段階: DB に保存済みの title だけを正規表現で解析し、シリーズ本体への紐付けを更新する
+                ## 放送期間は全番組の再判定完了後に作り直すため、ここでは一旦紐付けを解除する
+                while True:
+                    program_rows = await RecordedProgram.filter(id__gt=last_seen_id).order_by('id').limit(
+                        self.SERIES_RECLASSIFICATION_BATCH_SIZE
+                    ).values(
+                        'id',
+                        'channel_id',
+                        'series_id',
+                        'title',
+                        'series_title',
+                        'episode_number',
+                        'subtitle',
+                        'description',
+                        'genres',
+                        'start_time',
+                    )
+                    if len(program_rows) == 0:
+                        break
+
+                    for program_row in program_rows:
+                        last_seen_id = program_row['id']
+                        total_count += 1
+
+                        parsed_title = ProgramTitleParser.parse(program_row['title'], pattern)
+                        if parsed_title is None:
+                            series_title = None
+                            episode_number = None
+                            subtitle = None
+                            unmatched_count += 1
+                        else:
+                            series_title = parsed_title.series_title
+                            episode_number = parsed_title.episode_number
+                            subtitle = parsed_title.subtitle
+                            matched_count += 1
+
+                        # 既存 Series はタイトルが一致すれば再利用し、マイリストなどが保持する Series ID を維持する
+                        series_id, _ = await self.__resolveSeriesMetadata(
+                            series_title = series_title,
+                            description = program_row['description'],
+                            genres = cast(list[schemas.Genre], program_row['genres']),
+                            start_time = program_row['start_time'],
+                            channel_id = None,
+                        )
+
+                        # 実際に分類結果が変わった録画番組だけを変更件数として数える
+                        if (
+                            program_row['series_title'] != series_title or
+                            program_row['episode_number'] != episode_number or
+                            program_row['subtitle'] != subtitle or
+                            program_row['series_id'] != series_id
+                        ):
+                            changed_count += 1
+
+                        await RecordedProgram.filter(id=program_row['id']).update(
+                            series_id = series_id,
+                            series_broadcast_period_id = None,
+                            series_title = series_title,
+                            episode_number = episode_number,
+                            subtitle = subtitle,
+                        )
+
+                    # 大量の録画が存在する環境でもイベントループを占有し続けないよう、バッチごとに制御を返す
+                    if total_count % 500 == 0:
+                        logging.info(
+                            f'Series reclassification progress. '
+                            f'[processed: {total_count}, matched: {matched_count}, changed: {changed_count}]'
+                        )
+                    await asyncio.sleep(0)
+
+                # 第2段階: 全 RecordedProgram から放送期間の参照を外した後、古い放送期間を安全に削除する
+                ## Series 本体は削除せず ID を維持する。SeriesBroadcastPeriod は外部設定から参照されないため再構築して問題ない
+                await SeriesBroadcastPeriod.all().delete()
+
+                # シリーズ・チャンネルの組み合わせと番組日から、放送期間を現在の分類結果に基づいて再構築する
+                last_seen_id = 0
+                period_processed_count = 0
+                while True:
+                    classified_program_rows = await RecordedProgram.filter(id__gt=last_seen_id) \
+                        .exclude(series_id=None) \
+                        .exclude(channel_id=None) \
+                        .order_by('id') \
+                        .limit(self.SERIES_RECLASSIFICATION_BATCH_SIZE) \
+                        .values(
+                            'id',
+                            'channel_id',
+                            'series_title',
+                            'description',
+                            'genres',
+                            'start_time',
+                        )
+                    if len(classified_program_rows) == 0:
+                        break
+
+                    for program_row in classified_program_rows:
+                        last_seen_id = program_row['id']
+                        period_processed_count += 1
+
+                        _, series_broadcast_period_id = await self.__resolveSeriesMetadata(
+                            series_title = program_row['series_title'],
+                            description = program_row['description'],
+                            genres = cast(list[schemas.Genre], program_row['genres']),
+                            start_time = program_row['start_time'],
+                            channel_id = program_row['channel_id'],
+                        )
+                        await RecordedProgram.filter(id=program_row['id']).update(
+                            series_broadcast_period_id = series_broadcast_period_id,
+                        )
+
+                    if period_processed_count % 500 == 0:
+                        logging.info(
+                            f'Series broadcast period rebuild progress. [processed: {period_processed_count}]'
+                        )
+                    await asyncio.sleep(0)
+
+                # 正規表現変更で全録画が別シリーズへ移動し、参照されなくなった Series だけを最後に削除する
+                referenced_series_ids = cast(
+                    list[int],
+                    await RecordedProgram.exclude(series_id=None).distinct().values_list('series_id', flat=True),
+                )
+                if len(referenced_series_ids) == 0:
+                    await Series.all().delete()
+                else:
+                    await Series.exclude(id__in=referenced_series_ids).delete()
+
+        logging.info(
+            f'Series reclassification has completed. '
+            f'[total: {total_count}, matched: {matched_count}, unmatched: {unmatched_count}, changed: {changed_count}]'
+        )
+        return schemas.ProgramTitleReclassificationResult(
+            total_count = total_count,
+            matched_count = matched_count,
+            unmatched_count = unmatched_count,
+            changed_count = changed_count,
+        )
+
+
     async def __saveRecordedMetadataToDB(
         self,
         recorded_program: schemas.RecordedProgram,
@@ -893,8 +1208,11 @@ class RecordedScanTask:
             existing_db_recorded_video (RecordedVideo | None): 既に DB に永続化されている録画ファイルの RecordedVideo レコード
         """
 
-        # トランザクション配下に入れることでパフォーマンスが向上する
-        async with transactions.in_transaction():
+        # シリーズ一括再判定との競合を防いだ上で、トランザクション配下に入れてパフォーマンスと一貫性を確保する
+        ## AsyncExitStack を使うことで、既存処理のインデントを深くせず2つの非同期コンテキストを同時に保持する
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(self._series_reclassification_lock)
+            await stack.enter_async_context(transactions.in_transaction())
 
             # Channel の保存（まだ当該チャンネルが DB に存在しない場合のみ）
             db_channel = None
@@ -959,8 +1277,22 @@ class RecordedScanTask:
             # RecordedProgram の保存または更新
             if existing_db_recorded_video is not None:
                 db_recorded_program = existing_db_recorded_video.recorded_program
+                previous_series_id = db_recorded_program.series_id
+                previous_broadcast_period_id = db_recorded_program.series_broadcast_period_id
             else:
                 db_recorded_program = RecordedProgram()
+                previous_series_id = None
+                previous_broadcast_period_id = None
+
+            # 正規表現による解析結果から Series / SeriesBroadcastPeriod を解決する
+            ## MetadataAnalyzer は別プロセスでも動くため、DB 操作はメインプロセスで実行されるこの保存処理に集約する
+            series_id, series_broadcast_period_id = await self.__resolveSeriesMetadata(
+                series_title = recorded_program.series_title,
+                description = recorded_program.description,
+                genres = recorded_program.genres,
+                start_time = recorded_program.start_time,
+                channel_id = db_channel.id if db_channel is not None else None,
+            )
 
             # RecordedProgram の属性を設定 (id, created_at, updated_at は自動生成のため指定しない)
             db_recorded_program.recording_start_margin = recorded_program.recording_start_margin
@@ -970,8 +1302,8 @@ class RecordedScanTask:
             db_recorded_program.network_id = recorded_program.network_id
             db_recorded_program.service_id = recorded_program.service_id
             db_recorded_program.event_id = recorded_program.event_id
-            db_recorded_program.series_id = recorded_program.series_id
-            db_recorded_program.series_broadcast_period_id = recorded_program.series_broadcast_period_id
+            db_recorded_program.series_id = series_id
+            db_recorded_program.series_broadcast_period_id = series_broadcast_period_id
             db_recorded_program.title = recorded_program.title
             db_recorded_program.series_title = recorded_program.series_title
             db_recorded_program.episode_number = recorded_program.episode_number
@@ -988,6 +1320,14 @@ class RecordedScanTask:
             db_recorded_program.secondary_audio_type = recorded_program.secondary_audio_type
             db_recorded_program.secondary_audio_language = recorded_program.secondary_audio_language
             await db_recorded_program.save()
+
+            # 正規表現変更後の再解析などで紐付け先が変わった場合、参照されなくなった古いシリーズ情報を掃除する
+            await self.__cleanupOrphanedSeriesMetadata(
+                previous_series_id = previous_series_id,
+                previous_broadcast_period_id = previous_broadcast_period_id,
+                current_series_id = series_id,
+                current_broadcast_period_id = series_broadcast_period_id,
+            )
 
             # RecordedVideo の保存または更新
             if existing_db_recorded_video is not None:

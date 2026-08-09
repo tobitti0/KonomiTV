@@ -31,6 +31,10 @@ from app.constants import (
     BASE_DIR,
     LIBRARY_PATH,
 )
+from app.metadata.ProgramTitleParser import (
+    DEFAULT_PROGRAM_TITLE_REGEX,
+    ProgramTitleParser,
+)
 from app.utils.TSInformation import TerrestrialRegion
 
 
@@ -350,6 +354,22 @@ class _ServerSettingsTV(BaseModel):
 class _ServerSettingsVideo(BaseModel):
     recorded_folders: list[DirectoryPath] = []
     exclude_scan_paths: list[str] = []
+    program_title_regex: str = DEFAULT_PROGRAM_TITLE_REGEX
+
+    @field_validator('program_title_regex')
+    @classmethod
+    def validate_program_title_regex(cls, program_title_regex: str) -> str:
+        """
+        番組タイトルのシリーズ判定用正規表現を検証する。
+
+        Args:
+            program_title_regex (str): 検証対象の正規表現。
+
+        Returns:
+            str: 検証済みの正規表現。
+        """
+
+        return ProgramTitleParser.validatePattern(program_title_regex)
 
 class _ServerSettingsCapture(BaseModel):
     upload_folders: list[DirectoryPath] = []

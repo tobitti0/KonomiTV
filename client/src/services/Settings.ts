@@ -132,11 +132,38 @@ export interface IServerSettings {
     video: {
         recorded_folders: string[];
         exclude_scan_paths: string[];
+        program_title_regex: string;
     };
     capture: {
         upload_folders: string[];
     };
 }
+
+/** 番組タイトルのシリーズ判定用正規表現のテスト結果を表すインターフェース */
+export interface IProgramTitleRegexTestResult {
+    title: string;
+    matched: boolean;
+    series_title: string | null;
+    episode_number: string | null;
+    subtitle: string | null;
+}
+
+/** 番組タイトルのシリーズ判定用正規表現のテスト API レスポンスを表すインターフェース */
+export interface IProgramTitleRegexTestResponse {
+    results: IProgramTitleRegexTestResult[];
+}
+
+/** 保存済み録画番組のシリーズ一括再判定結果を表すインターフェース */
+export interface IProgramTitleReclassificationResult {
+    total_count: number;
+    matched_count: number;
+    unmatched_count: number;
+    changed_count: number;
+}
+
+// Python 側の DEFAULT_PROGRAM_TITLE_REGEX と一致させる必要がある
+// String.raw を使い、正規表現内のバックスラッシュをそのまま保持する
+export const DEFAULT_PROGRAM_TITLE_REGEX = String.raw`(?:(?:アニメA・|アニメギルド|tvアニメ|アニメ)\s*「?)?(.+?)\s*[」「（]?\s*(?:最|第(?=(?![^#＃]*[#＃]\s*\d)[一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+(?:話|夜|幕|章|旅))|[#＃]|症例|[Ee]pisode|Layer|[lL][vV]\.|karte\.|シフト|[Ee][Pp]|[cC]hapter|[（(]|\s+(?=[一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+\s*$))[\s:：]*?(?:第)?\s*([一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+)(?:話|夜|幕|章|旅)?[^「\s@]*?(?:\s|「|[)）])?([^」@]*)?`;
 
 /* サーバー設定を表すインターフェースのデフォルト値 */
 export const IServerSettingsDefault: IServerSettings = {
@@ -163,6 +190,7 @@ export const IServerSettingsDefault: IServerSettings = {
     video: {
         recorded_folders: [],
         exclude_scan_paths: [],
+        program_title_regex: DEFAULT_PROGRAM_TITLE_REGEX,
     },
     capture: {
         upload_folders: [],
@@ -259,6 +287,60 @@ class Settings {
         }
 
         return true;
+    }
+
+
+    /**
+     * 番組タイトルのシリーズ判定用正規表現をテストする
+     * @param pattern テスト対象の正規表現
+     * @param titles テスト対象の番組タイトル
+     * @return タイトルごとの解析結果 (取得に失敗した場合は null)
+     */
+    static async testProgramTitleRegex(pattern: string, titles: string[]): Promise<IProgramTitleRegexTestResult[] | null> {
+
+        // API リクエストを実行
+        const response = await APIClient.post<IProgramTitleRegexTestResponse>('/settings/server/program-title-regex/test', {
+            pattern,
+            titles,
+        });
+
+        // 構文エラーを含む正規表現は、サーバー側と同じ Python の正規表現エンジンで検証してエラーを表示する
+        if (response.type === 'error') {
+            APIClient.showGenericError(response, '番組タイトルのシリーズ判定用正規表現をテストできませんでした。');
+            return null;
+        }
+
+        return response.data.results;
+    }
+
+
+    /**
+     * DB に保存済みの録画番組を、指定された正規表現でシリーズへ一括再判定する
+     * @param pattern シリーズ再判定に利用する正規表現
+     * @return 再判定結果 (実行に失敗した場合は null)
+     */
+    static async reclassifyProgramTitles(pattern: string): Promise<IProgramTitleReclassificationResult | null> {
+
+        // 録画ファイルは解析しないが、大量の録画番組が保存されている環境を考慮してタイムアウトを1日に設定する
+        const response = await APIClient.post<IProgramTitleReclassificationResult>(
+            '/settings/server/program-title-regex/reclassify',
+            {pattern},
+            {timeout: 24 * 60 * 60 * 1000},
+        );
+
+        if (response.type === 'error') {
+            switch (response.data.detail) {
+                case 'Series reclassification is already running':
+                    APIClient.showGenericError(response, '録画番組のシリーズ再判定は既に実行中です。');
+                    break;
+                default:
+                    APIClient.showGenericError(response, '録画番組のシリーズ再判定を実行できませんでした。');
+                    break;
+            }
+            return null;
+        }
+
+        return response.data;
     }
 }
 

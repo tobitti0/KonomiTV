@@ -6,10 +6,11 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, RootModel, computed_field
+from pydantic import BaseModel, Field, RootModel, computed_field, field_validator
 from tortoise.contrib.pydantic import PydanticModel
 from typing_extensions import TypedDict
 
+from app.metadata.ProgramTitleParser import ProgramTitleParser
 from app.utils.TSInformation import TerrestrialRegion
 
 
@@ -322,6 +323,51 @@ class SeriesBroadcastPeriod(PydanticModel):
     start_date: date
     end_date: date
     recorded_programs: list[RecordedProgram]
+
+# ***** サーバー設定 *****
+
+class ProgramTitleRegexPatternRequest(BaseModel):
+    pattern: Annotated[str, Field(min_length=1, max_length=10000)]
+
+    @field_validator('pattern')
+    @classmethod
+    def validate_pattern(cls, pattern: str) -> str:
+        """
+        番組タイトル解析用正規表現を検証する。
+
+        Args:
+            pattern (str): 検証対象の正規表現。
+
+        Returns:
+            str: 検証済みの正規表現。
+        """
+
+        return ProgramTitleParser.validatePattern(pattern)
+
+class ProgramTitleRegexTestRequest(ProgramTitleRegexPatternRequest):
+    titles: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=1000)]],
+        Field(min_length=1, max_length=100),
+    ]
+
+class ProgramTitleRegexTestResult(BaseModel):
+    title: str
+    matched: bool
+    series_title: str | None
+    episode_number: str | None
+    subtitle: str | None
+
+class ProgramTitleRegexTestResponse(BaseModel):
+    results: list[ProgramTitleRegexTestResult]
+
+class ProgramTitleReclassificationRequest(ProgramTitleRegexPatternRequest):
+    """保存済み録画番組のシリーズ一括再判定リクエスト。"""
+
+class ProgramTitleReclassificationResult(BaseModel):
+    total_count: int
+    matched_count: int
+    unmatched_count: int
+    changed_count: int
 
 # ***** ユーザー *****
 

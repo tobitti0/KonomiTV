@@ -10,6 +10,10 @@
                         { name: 'ホーム', path: '/' },
                         { name: 'ビデオをみる', path: '/videos/', disabled: true },
                     ]" />
+                    <SeriesList class="videos-home-container__series" title="シリーズ"
+                        :seriesList="recentSeries" :total="totalSeries" layout="Carousel"
+                        :hidePagination="true" :showMoreButton="true" :isLoading="is_loading"
+                        @more="$router.push('/videos/series')" />
                     <RecordedProgramList
                         class="videos-home-container__recent-programs"
                         :class="{'videos-home-container__recent-programs--loading': recent_programs.length === 0 && is_loading}"
@@ -65,6 +69,8 @@ import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
 import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import RecordedProgramList from '@/components/Videos/RecordedProgramList.vue';
+import SeriesList from '@/components/Videos/SeriesList.vue';
+import SeriesService, { ISeries } from '@/services/Series';
 import { IRecordedProgram } from '@/services/Videos';
 import Videos from '@/services/Videos';
 import useSettingsStore from '@/stores/SettingsStore';
@@ -73,6 +79,10 @@ import useUserStore from '@/stores/UserStore';
 // 最近録画された番組のリスト
 const recent_programs = ref<IRecordedProgram[]>([]);
 const total_programs = ref(0);
+
+// 最近更新されたシリーズのリスト
+const recentSeries = ref<ISeries[]>([]);
+const totalSeries = ref(0);
 
 // マイリストの録画番組のリスト
 const mylist_programs = ref<IRecordedProgram[]>([]);
@@ -107,6 +117,15 @@ const fetchRecentPrograms = async () => {
     if (result) {
         recent_programs.value = result.recorded_programs.slice(0, 10);  // 最新10件のみ表示
         total_programs.value = result.total;
+    }
+};
+
+// 最近更新されたシリーズを取得
+const fetchRecentSeries = async () => {
+    const result = await SeriesService.fetchSeriesList('desc', 1);
+    if (result) {
+        recentSeries.value = result.series_list.slice(0, 10);
+        totalSeries.value = result.total;
     }
 };
 
@@ -157,6 +176,7 @@ const fetchWatchedPrograms = async () => {
 
 // 各セクションの更新関数を管理するオブジェクト
 const sectionUpdaters = {
+    recentSeries: fetchRecentSeries,
     recentPrograms: fetchRecentPrograms,
     mylistPrograms: fetchMylistPrograms,
     watchedPrograms: fetchWatchedPrograms,
@@ -255,6 +275,10 @@ onUnmounted(() => {
             }
         }
     }
+}
+
+.videos-home-container__series {
+    margin-bottom: 28px;
 }
 
 </style>

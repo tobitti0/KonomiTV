@@ -1499,6 +1499,17 @@ class PlayerController {
         // ビデオ視聴時のみ実行する処理
         if (this.playback_mode === 'Video') {
 
+            // 録画番組を最後まで再生したことを View 側へ通知する
+            // 次話の決定と画面遷移は Vue Router を扱える Videos/Watch.vue 側へ集約する
+            let is_playback_ended_emitted = false;
+            this.player.on('ended', () => {
+                if (is_playback_ended_emitted === true) {
+                    return;
+                }
+                is_playback_ended_emitted = true;
+                player_store.event_emitter.emit('PlaybackEnded', undefined);
+            });
+
             // 再生位置の変更（再生の進行状況）を Comment.vue にイベントとして通知する
             this.player.on('timeupdate', () => {
                 if (!this.player || !this.player.video) {

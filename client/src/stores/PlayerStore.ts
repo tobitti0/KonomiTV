@@ -4,6 +4,7 @@ import { defineStore } from 'pinia';
 
 import { ITweetCapture } from '@/components/Watch/Panel/Twitter.vue';
 import { ICommentData } from '@/services/player/managers/LiveCommentManager';
+import { ISeries } from '@/services/Series';
 import { IRecordedProgram, IRecordedProgramDefault } from '@/services/Videos';
 import useSettingsStore from '@/stores/SettingsStore';
 
@@ -52,6 +53,8 @@ export type PlayerEvents = {
     PlaybackPositionChanged: {
         playback_position: number;  // 再生位置 (秒)
     }
+    // 録画再生時: 録画番組を最後まで再生したことを通知する
+    PlaybackEnded: undefined;
     // 録画再生時: UI コンポーネントからプレイヤーに指定秒数へのシークを要求する
     SeekRequest: {
         playback_position: number;  // シーク先の再生位置 (秒)
@@ -79,6 +82,13 @@ const usePlayerStore = defineStore('player', {
         // 現在視聴中の録画番組の情報
         // 視聴中の録画番組がない場合は IRecordedProgramDefault を設定すべき (初期値も IRecordedProgramDefault にしている)
         recorded_program: structuredClone(IRecordedProgramDefault) as IRecordedProgram,
+
+        // 現在視聴中の録画番組が属するシリーズ情報
+        // シリーズへ紐付いていない録画番組、または取得に失敗した場合は null
+        series: null as ISeries | null,
+
+        // 現在視聴中の録画番組に対応するシリーズ情報を取得中かどうか
+        is_series_loading: false,
 
         // 仮想キーボードが表示されているか
         // 既定で表示されていない想定
@@ -212,6 +222,8 @@ const usePlayerStore = defineStore('player', {
             this.is_watching = false;
             this.is_player_initialized = false;
             this.recorded_program = structuredClone(IRecordedProgramDefault);
+            this.series = null;
+            this.is_series_loading = false;
             this.is_virtual_keyboard_display = false;
             this.is_fullscreen = false;
             this.is_document_pip = false;
