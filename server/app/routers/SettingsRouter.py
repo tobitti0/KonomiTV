@@ -5,7 +5,14 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 
 from app import logging, schemas
-from app.config import ClientSettings, Config, SaveConfig, ServerSettings
+from app.config import (
+    ApplyProgramTitleRegex,
+    ClientSettings,
+    Config,
+    SaveConfig,
+    SaveProgramTitleRegex,
+    ServerSettings,
+)
 from app.metadata.ProgramTitleParser import ProgramTitleParser
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.models.User import User
@@ -104,6 +111,10 @@ async def ServerSettingsUpdateAPI(
     # バリデーションが完了したサーバー設定を config.yaml に保存する
     SaveConfig(server_settings)
 
+    # 番組タイトルのシリーズ判定用正規表現は、サーバーを再起動せず今後の解析へ反映する
+    # ほかの設定は従来どおりサーバー再起動後に反映される
+    ApplyProgramTitleRegex(server_settings.video.program_title_regex)
+
 
 @router.post(
     '/server/program-title-regex/test',
@@ -150,7 +161,7 @@ async def ProgramTitleReclassificationAPI(
     current_user: Annotated[User, Depends(GetCurrentAdminUser)],
 ):
     """
-    DB に保存済みの録画番組タイトルを指定された正規表現で再解析し、シリーズへの紐付けを一括更新する。<br>
+    指定された正規表現を config.yaml へ保存・即時反映した上で、DB に保存済みの録画番組タイトルを再解析し、シリーズへの紐付けを一括更新する。<br>
     録画ファイルの再解析は行わないため、CM 区間情報・サムネイル・動画メタデータは変更されない。<br>
 
     JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
@@ -173,6 +184,10 @@ async def ProgramTitleReclassificationAPI(
             status_code = status.HTTP_429_TOO_MANY_REQUESTS,
             detail = 'Series reclassification is already running',
         )
+
+    # 再判定に使う正規表現を保存し、今後新しく解析される録画にも即時反映する
+    # 保存に失敗した場合はシリーズ再判定を開始しない
+    SaveProgramTitleRegex(request.pattern)
 
     # HTTP コネクションが途中で切断されても DB 更新を最後まで完了またはロールバックできるよう独立タスクで実行する
     program_title_reclassification_task = asyncio.create_task(ProgramTitleReclassification())

@@ -120,9 +120,9 @@ const fetchRecentPrograms = async () => {
     }
 };
 
-// 最近更新されたシリーズを取得
+// 最近放送されたシリーズを取得
 const fetchRecentSeries = async () => {
-    const result = await SeriesService.fetchSeriesList('desc', 1);
+    const result = await SeriesService.fetchSeriesList({sort: 'broadcasted_at', order: 'desc', page: 1});
     if (result) {
         recentSeries.value = result.series_list.slice(0, 10);
         totalSeries.value = result.total;

@@ -83,7 +83,7 @@ const searchPrograms = async () => {
     is_searching.value = true;  // 検索開始時に検索中フラグを立てる
     const [programResult, seriesResult] = await Promise.all([
         Videos.searchVideos(query.value, sort_order.value, current_page.value),
-        SeriesService.searchSeries(query.value, 'desc', 1),
+        SeriesService.searchSeries(query.value, {sort: 'broadcasted_at', order: 'desc', page: 1}),
     ]);
     if (programResult) {
         programs.value = programResult.recorded_programs;
