@@ -104,6 +104,13 @@ export interface IClientSettings {
     tweet_capture_watermark_position: 'None' | 'TopLeft' | 'TopRight' | 'BottomLeft' | 'BottomRight';
 }
 
+/** 番組タイトルのシリーズ判定用正規表現ルールを表すインターフェース */
+export interface IProgramTitleRegexRule {
+    name: string;
+    pattern: string;
+    enabled: boolean;
+}
+
 /**
  * サーバー設定を表すインターフェース
  * サーバー側の app.config.ServerSettings で定義されているものと同じ
@@ -132,7 +139,7 @@ export interface IServerSettings {
     video: {
         recorded_folders: string[];
         exclude_scan_paths: string[];
-        program_title_regex: string;
+        program_title_regexes: IProgramTitleRegexRule[];
     };
     capture: {
         upload_folders: string[];
@@ -143,6 +150,8 @@ export interface IServerSettings {
 export interface IProgramTitleRegexTestResult {
     title: string;
     matched: boolean;
+    matched_rule_index: number | null;
+    matched_rule_name: string | null;
     series_title: string | null;
     episode_number: string | null;
     subtitle: string | null;
@@ -163,7 +172,21 @@ export interface IProgramTitleReclassificationResult {
 
 // Python 側の DEFAULT_PROGRAM_TITLE_REGEX と一致させる必要がある
 // String.raw を使い、正規表現内のバックスラッシュをそのまま保持する
-export const DEFAULT_PROGRAM_TITLE_REGEX = String.raw`(?:(?:アニメA・|アニメギルド|tvアニメ|アニメ)\s*「?)?(.+?)\s*[」「（]?\s*(?:最|第(?=(?![^#＃]*[#＃]\s*\d)[一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+(?:話|夜|幕|章|旅))|[#＃]|症例|[Ee]pisode|Layer|[lL][vV]\.|karte\.|シフト|[Ee][Pp]|[cC]hapter|[（(]|\s+(?=[一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+\s*$))[\s:：]*?(?:第)?\s*([一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+)(?:話|夜|幕|章|旅)?[^「\s@]*?(?:\s|「|[)）])?([^」@]*)?`;
+export const DEFAULT_PROGRAM_TITLE_REGEX = String.raw`(?:(?:アニメA・\s*|アニメA\s*(?=「)|(?:水曜アニメ(?:[<＜]水もん[>＞]|・水もん)|[<＜](?:アニメギルド|ノイタミナ)[>＞]|アニメギルド|tvアニメ|アニメ)\s*「?))?(.+?)\s*[」「（]?\s*(?:最|第(?=(?![^#＃]*[#＃]\s*\d)[一二三四五六七八九十壱弐参拾〇零0-9０-９,・~～〜\-終]+(?:話|夜|幕|章|旅|講))|[#＃]|症例|[Ee]pisode|Layer|[lL][vV]\.|karte\.|シフト|[Ee][Pp]|Teil|[cC]hapter|[（(]|\s+(?=[一二三四五六七八九十壱弐参拾〇零0-9０-９,・~～〜\-終]+\s*$))[\s:：]*?(?:第)?\s*([一二三四五六七八九十壱弐参拾〇零0-9０-９,・~～〜\-終]+)(?:話|夜|幕|章|旅|講)?[^「\s@]*?(?:\s*「|\s|[)）])?([^」@]*)?`;
+export const DEFAULT_PROGRAM_TITLE_QUOTED_SUBTITLE_REGEX = String.raw`^(?:(?:アニメA・\s*|(?:水曜アニメ(?:[<＜]水もん[>＞]|・水もん)|[<＜](?:アニメギルド|ノイタミナ)[>＞]|アニメギルド|tvアニメ|アニメ)\s+))?(.+?)\s*(?:[#＃]\s*([0-9０-９]+)\s*)?[「『](.+?)[」』]\s*$`;
+
+export const DEFAULT_PROGRAM_TITLE_REGEX_RULES: IProgramTitleRegexRule[] = [
+    {
+        name: '話数表記のある番組',
+        pattern: DEFAULT_PROGRAM_TITLE_REGEX,
+        enabled: true,
+    },
+    {
+        name: '話数なしのサブタイトル付き番組',
+        pattern: DEFAULT_PROGRAM_TITLE_QUOTED_SUBTITLE_REGEX,
+        enabled: true,
+    },
+];
 
 /* サーバー設定を表すインターフェースのデフォルト値 */
 export const IServerSettingsDefault: IServerSettings = {
@@ -190,7 +213,7 @@ export const IServerSettingsDefault: IServerSettings = {
     video: {
         recorded_folders: [],
         exclude_scan_paths: [],
-        program_title_regex: DEFAULT_PROGRAM_TITLE_REGEX,
+        program_title_regexes: DEFAULT_PROGRAM_TITLE_REGEX_RULES,
     },
     capture: {
         upload_folders: [],
@@ -292,15 +315,18 @@ class Settings {
 
     /**
      * 番組タイトルのシリーズ判定用正規表現をテストする
-     * @param pattern テスト対象の正規表現
+     * @param rules テスト対象の正規表現ルール一覧
      * @param titles テスト対象の番組タイトル
      * @return タイトルごとの解析結果 (取得に失敗した場合は null)
      */
-    static async testProgramTitleRegex(pattern: string, titles: string[]): Promise<IProgramTitleRegexTestResult[] | null> {
+    static async testProgramTitleRegex(
+        rules: IProgramTitleRegexRule[],
+        titles: string[],
+    ): Promise<IProgramTitleRegexTestResult[] | null> {
 
         // API リクエストを実行
         const response = await APIClient.post<IProgramTitleRegexTestResponse>('/settings/server/program-title-regex/test', {
-            pattern,
+            rules,
             titles,
         });
 
@@ -315,16 +341,18 @@ class Settings {
 
 
     /**
-     * 指定された正規表現を保存・即時反映し、DB に保存済みの録画番組をシリーズへ一括再判定する
-     * @param pattern 保存とシリーズ再判定に利用する正規表現
+     * 指定された正規表現ルール一覧を保存・即時反映し、DB に保存済みの録画番組をシリーズへ一括再判定する
+     * @param rules 保存とシリーズ再判定に利用する正規表現ルール一覧
      * @return 再判定結果 (実行に失敗した場合は null)
      */
-    static async reclassifyProgramTitles(pattern: string): Promise<IProgramTitleReclassificationResult | null> {
+    static async reclassifyProgramTitles(
+        rules: IProgramTitleRegexRule[],
+    ): Promise<IProgramTitleReclassificationResult | null> {
 
         // 録画ファイルは解析しないが、大量の録画番組が保存されている環境を考慮してタイムアウトを1日に設定する
         const response = await APIClient.post<IProgramTitleReclassificationResult>(
             '/settings/server/program-title-regex/reclassify',
-            {pattern},
+            {rules},
             {timeout: 24 * 60 * 60 * 1000},
         );
 

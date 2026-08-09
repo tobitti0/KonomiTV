@@ -1,18 +1,34 @@
+from __future__ import annotations
+
 import functools
 import re
-from dataclasses import dataclass
-from typing import ClassVar
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from typing import Annotated, ClassVar
+
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 
 # TVDashboard で実運用されている番組タイトル解析用正規表現を初期値として採用する
 ## 第1キャプチャはシリーズ名、第2キャプチャは話数、第3キャプチャはサブタイトルとして扱う
 DEFAULT_PROGRAM_TITLE_REGEX = (
-    r'(?:(?:アニメA・|アニメギルド|tvアニメ|アニメ)\s*「?)?(.+?)\s*[」「（]?\s*'
-    r'(?:最|第(?=(?![^#＃]*[#＃]\s*\d)[一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+(?:話|夜|幕|章|旅))|'
-    r'[#＃]|症例|[Ee]pisode|Layer|[lL][vV]\.|karte\.|シフト|[Ee][Pp]|[cC]hapter|[（(]|'
-    r'\s+(?=[一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+\s*$))'
-    r'[\s:：]*?(?:第)?\s*([一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+)'
-    r'(?:話|夜|幕|章|旅)?[^「\s@]*?(?:\s*「|\s|[)）])?([^」@]*)?'
+    r'(?:(?:アニメA・\s*|アニメA\s*(?=「)|(?:水曜アニメ(?:[<＜]水もん[>＞]|・水もん)|'
+    r'[<＜](?:アニメギルド|ノイタミナ)[>＞]|アニメギルド|tvアニメ|アニメ)\s*「?))?'
+    r'(.+?)\s*[」「（]?\s*'
+    r'(?:最|第(?=(?![^#＃]*[#＃]\s*\d)[一二三四五六七八九十壱弐参拾〇零0-9０-９,・~～〜\-終]+'
+    r'(?:話|夜|幕|章|旅|講))|'
+    r'[#＃]|症例|[Ee]pisode|Layer|[lL][vV]\.|karte\.|シフト|[Ee][Pp]|Teil|[cC]hapter|[（(]|'
+    r'\s+(?=[一二三四五六七八九十壱弐参拾〇零0-9０-９,・~～〜\-終]+\s*$))'
+    r'[\s:：]*?(?:第)?\s*([一二三四五六七八九十壱弐参拾〇零0-9０-９,・~～〜\-終]+)'
+    r'(?:話|夜|幕|章|旅|講)?[^「\s@]*?(?:\s*「|\s|[)）])?([^」@]*)?'
+)
+
+# 話数表記がなく「番組名『放送回の題名』」だけで構成される番組をシリーズとして扱う補助ルール
+## 通常の話数付きルールを先に評価し、このルールはその後に評価する
+DEFAULT_PROGRAM_TITLE_QUOTED_SUBTITLE_REGEX = (
+    r'^(?:(?:アニメA・\s*|(?:水曜アニメ(?:[<＜]水もん[>＞]|・水もん)|'
+    r'[<＜](?:アニメギルド|ノイタミナ)[>＞]|アニメギルド|tvアニメ|アニメ)\s+))?'
+    r'(.+?)\s*(?:[#＃]\s*([0-9０-９]+)\s*)?[「『](.+?)[」』]\s*$'
 )
 
 # KonomiTV が ARIB 外字から変換する番組付属情報と、クライアントで番組付属情報として装飾している記号の一覧
@@ -42,6 +58,7 @@ class ParsedProgramTitle:
     series_title: str
     episode_number: str | None
     subtitle: str | None
+    matched_rule_index: int | None = None
 
 
 class ProgramTitleParser:
@@ -121,6 +138,32 @@ class ProgramTitleParser:
 
 
     @classmethod
+    def validateRules(cls, rules: Sequence[ProgramTitleRegexRule]) -> Sequence[ProgramTitleRegexRule]:
+        """
+        番組タイトル解析用正規表現ルールの一覧を検証する。
+
+        Args:
+            rules (Sequence[ProgramTitleRegexRule]): 優先順位順の正規表現ルール一覧。
+
+        Returns:
+            Sequence[ProgramTitleRegexRule]: 検証済みの正規表現ルール一覧。
+
+        Raises:
+            ValueError: ルールが空、または有効なルールが存在しない場合。
+        """
+
+        if len(rules) == 0:
+            raise ValueError('番組タイトルのシリーズ判定用正規表現を1件以上設定してください。')
+        if all(rule.enabled is False for rule in rules):
+            raise ValueError('番組タイトルのシリーズ判定用正規表現を1件以上有効にしてください。')
+
+        # 個々のパターンは Pydantic モデル生成時にも検証されるが、API 以外から呼ばれた場合にも保証する
+        for rule in rules:
+            cls.validatePattern(rule.pattern)
+        return rules
+
+
+    @classmethod
     def parse(cls, title: str, pattern: str) -> ParsedProgramTitle | None:
         """
         番組タイトルをシリーズ名・話数・サブタイトルへ分解する。
@@ -160,3 +203,67 @@ class ProgramTitleParser:
             episode_number = episode_number,
             subtitle = subtitle,
         )
+
+
+    @classmethod
+    def parseWithRules(
+        cls,
+        title: str,
+        rules: Sequence[ProgramTitleRegexRule],
+    ) -> ParsedProgramTitle | None:
+        """
+        優先順位順のルールを使い、番組タイトルをシリーズ情報へ分解する。
+
+        Args:
+            title (str): 解析対象の番組タイトル。
+            rules (Sequence[ProgramTitleRegexRule]): 優先順位順の正規表現ルール一覧。
+
+        Returns:
+            ParsedProgramTitle | None: 最初に一致したルールの解析結果。一致しない場合は None。
+        """
+
+        for index, rule in enumerate(rules):
+            # 無効なルールは一覧に残したまま一時的に判定対象から外せるようにする
+            if rule.enabled is False:
+                continue
+
+            parsed_title = cls.parse(title=title, pattern=rule.pattern)
+            if parsed_title is not None:
+                return replace(parsed_title, matched_rule_index=index)
+        return None
+
+
+class ProgramTitleRegexRule(BaseModel):
+    """番組タイトルをシリーズ情報へ分解する正規表現ルール。"""
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    pattern: Annotated[str, Field(min_length=1, max_length=10000)]
+    enabled: bool = True
+
+    @field_validator('pattern')
+    @classmethod
+    def validate_pattern(cls, pattern: str) -> str:
+        """
+        番組タイトル解析用正規表現を検証する。
+
+        Args:
+            pattern (str): 検証対象の正規表現。
+
+        Returns:
+            str: 検証済みの正規表現。
+        """
+
+        return ProgramTitleParser.validatePattern(pattern)
+
+
+# 上から順に評価し、最初に一致したルールを採用する
+DEFAULT_PROGRAM_TITLE_REGEX_RULES = [
+    ProgramTitleRegexRule(
+        name = '話数表記のある番組',
+        pattern = DEFAULT_PROGRAM_TITLE_REGEX,
+    ),
+    ProgramTitleRegexRule(
+        name = '話数なしのサブタイトル付き番組',
+        pattern = DEFAULT_PROGRAM_TITLE_QUOTED_SUBTITLE_REGEX,
+    ),
+]

@@ -22,7 +22,7 @@ from app.constants import JST, THUMBNAILS_DIR
 from app.extensions.box_streaming.BoxRecordingCatalog import BoxRecordingCatalog
 from app.metadata.CMSectionsDetector import CMSectionsDetector
 from app.metadata.MetadataAnalyzer import MetadataAnalyzer
-from app.metadata.ProgramTitleParser import ProgramTitleParser
+from app.metadata.ProgramTitleParser import ProgramTitleParser, ProgramTitleRegexRule
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.models.Channel import Channel
 from app.models.CMAnalysisRun import CMAnalysisRun
@@ -1028,20 +1028,23 @@ class RecordedScanTask:
             await Series.filter(id=previous_series_id).delete()
 
 
-    async def reclassifySeries(self, pattern: str) -> schemas.ProgramTitleReclassificationResult:
+    async def reclassifySeries(
+        self,
+        rules: list[ProgramTitleRegexRule],
+    ) -> schemas.ProgramTitleReclassificationResult:
         """
-        DB に保存済みの全録画番組を、指定された正規表現でシリーズへ再分類する。
+        DB に保存済みの全録画番組を、指定された正規表現ルール一覧でシリーズへ再分類する。
         録画ファイルや RecordedVideo にはアクセスせず、CM 区間情報・サムネイル・動画メタデータは変更しない。
 
         Args:
-            pattern (str): 番組タイトルのシリーズ判定に利用する正規表現。
+            rules (list[ProgramTitleRegexRule]): 番組タイトルのシリーズ判定に利用する正規表現ルール一覧。
 
         Returns:
             schemas.ProgramTitleReclassificationResult: 全件数・一致件数・不一致件数・変更件数。
         """
 
-        # API 以外から呼ばれた場合にも不正な正規表現で途中まで更新されないよう、トランザクション開始前に検証する
-        ProgramTitleParser.validatePattern(pattern)
+        # API 以外から呼ばれた場合にも不正なルールで途中まで更新されないよう、トランザクション開始前に検証する
+        ProgramTitleParser.validateRules(rules)
 
         total_count = 0
         matched_count = 0
@@ -1079,7 +1082,7 @@ class RecordedScanTask:
                         last_seen_id = program_row['id']
                         total_count += 1
 
-                        parsed_title = ProgramTitleParser.parse(program_row['title'], pattern)
+                        parsed_title = ProgramTitleParser.parseWithRules(program_row['title'], rules)
                         if parsed_title is None:
                             series_title = None
                             episode_number = None

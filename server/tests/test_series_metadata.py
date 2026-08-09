@@ -7,6 +7,7 @@ from tortoise import Tortoise
 
 from app import schemas
 from app.constants import JST
+from app.metadata.ProgramTitleParser import ProgramTitleRegexRule
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.models.Channel import Channel
 from app.models.RecordedProgram import RecordedProgram
@@ -323,7 +324,12 @@ class SeriesMetadataTest(unittest.IsolatedAsyncioTestCase):
         await db_video.save()
         video_updated_at_before = db_video.updated_at
 
-        result = await self.scan_task.reclassifySeries(r'^(.+?)\s+#(\d+)「(.+)」$')
+        result = await self.scan_task.reclassifySeries([
+            ProgramTitleRegexRule(
+                name = 'テストルール',
+                pattern = r'^(.+?)\s+#(\d+)「(.+)」$',
+            ),
+        ])
 
         self.assertEqual(result.total_count, 1)
         self.assertEqual(result.matched_count, 1)

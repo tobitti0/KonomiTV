@@ -623,9 +623,9 @@ class MetadataAnalyzer:
 
         # EIT またはファイル名から取得した番組タイトルを、設定された正規表現でシリーズ情報へ分解する
         ## ここで解析することで、TSInfoAnalyzer から取得できた番組だけでなく、ファイル名へフォールバックした番組も同じ規則で扱える
-        parsed_program_title = ProgramTitleParser.parse(
+        parsed_program_title = ProgramTitleParser.parseWithRules(
             title = recorded_program.title,
-            pattern = Config().video.program_title_regex,
+            rules = Config().video.program_title_regexes,
         )
         if parsed_program_title is not None:
             recorded_program.series_title = parsed_program_title.series_title

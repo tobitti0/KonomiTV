@@ -3,7 +3,9 @@ import unittest
 from app.metadata.ProgramTitleParser import (
     ARIB_PROGRAM_DECORATION_MARKS,
     DEFAULT_PROGRAM_TITLE_REGEX,
+    DEFAULT_PROGRAM_TITLE_REGEX_RULES,
     ProgramTitleParser,
+    ProgramTitleRegexRule,
 )
 
 
@@ -98,7 +100,7 @@ class ProgramTitleParserTest(unittest.TestCase):
             ),
             (
                 '[終]＜ノイタミナ＞しゃばけ　第十三話　[解][字]',
-                '＜ノイタミナ＞しゃばけ',
+                'しゃばけ',
                 '十三',
                 None,
             ),
@@ -168,6 +170,57 @@ class ProgramTitleParserTest(unittest.TestCase):
 
     def test_nonmatching_title_returns_none(self) -> None:
         self.assertIsNone(ProgramTitleParser.parse('話数表記のない単発番組', DEFAULT_PROGRAM_TITLE_REGEX))
+
+
+    def test_quoted_subtitle_rule_matches_program_without_episode_number(self) -> None:
+        result = ProgramTitleParser.parseWithRules(
+            '名探偵コナン「黒ずくめの謀略（狩り）」',
+            DEFAULT_PROGRAM_TITLE_REGEX_RULES,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.matched_rule_index, 1)
+        self.assertEqual(result.series_title, '名探偵コナン')
+        self.assertIsNone(result.episode_number)
+        self.assertEqual(result.subtitle, '黒ずくめの謀略（狩り）')
+
+
+    def test_fullwidth_episode_number_and_lecture_unit_are_supported(self) -> None:
+        result = ProgramTitleParser.parse('３年Ｚ組銀八先生 第１２講', DEFAULT_PROGRAM_TITLE_REGEX)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.series_title, '３年Ｚ組銀八先生')
+        self.assertEqual(result.episode_number, '１２')
+
+
+    def test_first_matching_enabled_rule_has_priority(self) -> None:
+        rules = [
+            ProgramTitleRegexRule(name='優先ルール', pattern=r'^(名探偵コナン)「()(.*)」$'),
+            ProgramTitleRegexRule(name='後続ルール', pattern=r'^(.+?)「()(.*)」$'),
+        ]
+        result = ProgramTitleParser.parseWithRules('名探偵コナン「テスト」', rules)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.matched_rule_index, 0)
+        self.assertEqual(result.series_title, '名探偵コナン')
+
+
+    def test_disabled_rule_is_skipped(self) -> None:
+        rules = [
+            ProgramTitleRegexRule(name='無効ルール', pattern=r'^(名探偵コナン)「()(.*)」$', enabled=False),
+            ProgramTitleRegexRule(name='有効ルール', pattern=r'^(.+?)「()(.*)」$'),
+        ]
+        result = ProgramTitleParser.parseWithRules('名探偵コナン「テスト」', rules)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.matched_rule_index, 1)
+
+
+    def test_all_rules_cannot_be_disabled(self) -> None:
+        with self.assertRaises(ValueError):
+            ProgramTitleParser.validateRules([
+                ProgramTitleRegexRule(name='無効ルール', pattern=r'(.+)', enabled=False),
+            ])
 
 
     def test_unanchored_custom_pattern_searches_the_whole_title(self) -> None:
