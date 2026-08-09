@@ -1,6 +1,7 @@
 import unittest
 
 from app.metadata.ProgramTitleParser import (
+    ARIB_PROGRAM_DECORATION_MARKS,
     DEFAULT_PROGRAM_TITLE_REGEX,
     ProgramTitleParser,
 )
@@ -72,6 +73,36 @@ class ProgramTitleParserTest(unittest.TestCase):
                 None,
             ),
             (
+                '[字]名探偵コナン #968',
+                '名探偵コナン',
+                '968',
+                None,
+            ),
+            (
+                '[解][字]アニメ　透明男と人間女～そのうち夫婦になるふたり～　第2話 「デート大作戦」',
+                '透明男と人間女～そのうち夫婦になるふたり～',
+                '2',
+                'デート大作戦',
+            ),
+            (
+                '[新][解][字]アニメ　透明男と人間女～そのうち夫婦になるふたり～　#01',
+                '透明男と人間女～そのうち夫婦になるふたり～',
+                '01',
+                None,
+            ),
+            (
+                '[字]アニメ　永久のユウグレ[終]　第12話 あなたの愛はあなたのもの',
+                '永久のユウグレ',
+                '12',
+                'あなたの愛はあなたのもの',
+            ),
+            (
+                '[終]＜ノイタミナ＞しゃばけ　第十三話　[解][字]',
+                '＜ノイタミナ＞しゃばけ',
+                '十三',
+                None,
+            ),
+            (
                 'アニメA・僕の心のヤバイやつ Karte.1「僕は奪われた」',
                 '僕の心のヤバイやつ',
                 '1',
@@ -105,6 +136,34 @@ class ProgramTitleParserTest(unittest.TestCase):
                 self.assertEqual(result.series_title, series_title)
                 self.assertEqual(result.episode_number, episode_number)
                 self.assertEqual(result.subtitle, subtitle)
+
+
+    def test_all_known_arib_program_decoration_marks_are_removed_only_for_parsing(self) -> None:
+        for mark in ARIB_PROGRAM_DECORATION_MARKS:
+            with self.subTest(mark=mark):
+                title = f'[{mark}]テストアニメ[{mark}] #1 [{mark}]'
+                result = ProgramTitleParser.parse(title, DEFAULT_PROGRAM_TITLE_REGEX)
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertEqual(result.series_title, 'テストアニメ')
+                self.assertEqual(result.episode_number, '1')
+                self.assertIsNone(result.subtitle)
+
+
+    def test_parenthesized_arib_program_decoration_marks_are_removed(self) -> None:
+        for mark in ['二', '字', '再']:
+            with self.subTest(mark=mark):
+                result = ProgramTitleParser.parse(f'({mark})テストアニメ #1', DEFAULT_PROGRAM_TITLE_REGEX)
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertEqual(result.series_title, 'テストアニメ')
+
+
+    def test_unknown_bracketed_text_is_preserved_as_part_of_series_title(self) -> None:
+        result = ProgramTitleParser.parse('[OVA] テストアニメ [Season 2] #1', DEFAULT_PROGRAM_TITLE_REGEX)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.series_title, '[OVA] テストアニメ [Season 2]')
 
 
     def test_nonmatching_title_returns_none(self) -> None:

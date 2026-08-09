@@ -315,8 +315,8 @@ class Settings {
 
 
     /**
-     * DB に保存済みの録画番組を、指定された正規表現でシリーズへ一括再判定する
-     * @param pattern シリーズ再判定に利用する正規表現
+     * 指定された正規表現を保存・即時反映し、DB に保存済みの録画番組をシリーズへ一括再判定する
+     * @param pattern 保存とシリーズ再判定に利用する正規表現
      * @return 再判定結果 (実行に失敗した場合は null)
      */
     static async reclassifyProgramTitles(pattern: string): Promise<IProgramTitleReclassificationResult | null> {

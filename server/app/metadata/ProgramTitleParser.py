@@ -12,7 +12,26 @@ DEFAULT_PROGRAM_TITLE_REGEX = (
     r'[#＃]|症例|[Ee]pisode|Layer|[lL][vV]\.|karte\.|シフト|[Ee][Pp]|[cC]hapter|[（(]|'
     r'\s+(?=[一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+\s*$))'
     r'[\s:：]*?(?:第)?\s*([一二三四五六七八九十壱弐参拾〇零0-9,・~\-終]+)'
-    r'(?:話|夜|幕|章|旅)?[^「\s@]*?(?:\s|「|[)）])?([^」@]*)?'
+    r'(?:話|夜|幕|章|旅)?[^「\s@]*?(?:\s*「|\s|[)）])?([^」@]*)?'
+)
+
+# KonomiTV が ARIB 外字から変換する番組付属情報と、クライアントで番組付属情報として装飾している記号の一覧
+## シリーズ判定用正規表現へ渡すタイトルからだけ除去し、DB に保存する元の番組タイトルには影響を与えない
+## リスト外の [OVA] や [Season 2] など、作品名の一部である可能性がある角括弧表記は除去しない
+ARIB_PROGRAM_DECORATION_MARKS = frozenset({
+    '新', '終', '再', '交', '映', '手', '声', '多', '副', '字', '文', 'CC', 'OP', '二',
+    'S', 'B', 'SS', '無', '無料', 'C', 'S1', 'S2', 'S3', 'MV', '双', 'デ', 'D', 'N',
+    'W', 'P', 'H', 'HV', 'SD', '天', '解', '料', '前', '後', '初', '生', '販', '吹',
+    'PPV', '演', '移', '他', '収', '・', '英', '韓', '中', '字/日', '字/日英', 'ほか',
+    '3D', '2ndScr', '2K', '4K', '8K', '5.1', '7.1', '22.2', '60P', '120P', 'd',
+    'HC', 'HDR', 'Hi-Res', 'Lossless', 'SHV', 'UHD', 'VOD', '配',
+})
+
+# 長い記号から並べることで、将来部分一致を含む表記が追加されても意図した候補を先に評価する
+_ARIB_PROGRAM_DECORATION_PATTERN = re.compile(
+    r'\((?:二|字|再)\)|\[(?:' +
+    '|'.join(re.escape(mark) for mark in sorted(ARIB_PROGRAM_DECORATION_MARKS, key=len, reverse=True)) +
+    r')\]'
 )
 
 
@@ -31,6 +50,22 @@ class ProgramTitleParser:
     # 同じ設定値で録画を連続解析する際に正規表現の再コンパイルを避ける
     ## Web のテスターでは未保存の正規表現も渡されるため、直近の複数パターンを保持できるサイズにする
     REGEX_CACHE_SIZE: ClassVar[int] = 16
+
+
+    @classmethod
+    def normalizeTitle(cls, title: str) -> str:
+        """
+        シリーズ判定用に、タイトルから既知の ARIB 番組付属情報だけを除去する。
+        表示・保存用の元タイトルを変更せず、正規表現によるシリーズ判定時にのみ利用する。
+
+        Args:
+            title (str): 正規化前の番組タイトル。
+
+        Returns:
+            str: ARIB 番組付属情報を除去した番組タイトル。
+        """
+
+        return _ARIB_PROGRAM_DECORATION_PATTERN.sub('', title)
 
 
     @classmethod
@@ -99,8 +134,9 @@ class ProgramTitleParser:
         """
 
         compiled_pattern = cls.__compilePattern(pattern)
+        normalized_title = cls.normalizeTitle(title)
         # JavaScript の String.match() と同様に、アンカーがない正規表現はタイトル全体から一致箇所を探索する
-        match = compiled_pattern.search(title)
+        match = compiled_pattern.search(normalized_title)
         if match is None:
             return None
 

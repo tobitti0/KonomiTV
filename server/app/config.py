@@ -517,6 +517,92 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
     return _CONFIG
 
 
+def _LoadConfigYAML() -> tuple[ruamel.yaml.YAML, ruamel.yaml.CommentedMap]:
+    """
+    コメントやクォートを保持したまま更新できる状態で config.yaml を読み込む。
+
+    Returns:
+        tuple[ruamel.yaml.YAML, ruamel.yaml.CommentedMap]: YAML 操作オブジェクトと設定データ。
+
+    Raises:
+        RuntimeError: config.yaml を読み込めない、またはルート要素がマッピングでない場合。
+    """
+
+    global _CONFIG_YAML_PATH
+
+    yaml = ruamel.yaml.YAML()
+    yaml.default_flow_style = None  # None を使うと、スカラー以外のものはブロックスタイルになる
+    yaml.preserve_quotes = True
+    yaml.width = 20
+    yaml.indent(mapping=4, sequence=4, offset=4)
+    try:
+        with open(_CONFIG_YAML_PATH, encoding='utf-8') as file:
+            config_raw = yaml.load(file)
+    except Exception as error:
+        raise RuntimeError(f'Failed to load config.yaml: {error}')
+
+    if isinstance(config_raw, ruamel.yaml.CommentedMap) is False:
+        raise RuntimeError('Failed to load config.yaml: root element is not a mapping')
+    return yaml, config_raw
+
+
+def _DumpConfigYAML(yaml: ruamel.yaml.YAML, config_raw: ruamel.yaml.CommentedMap) -> None:
+    """
+    コメントや既存フォーマットを保持しながら config.yaml を保存する。
+
+    Args:
+        yaml (ruamel.yaml.YAML): config.yaml の読み込みに利用した YAML 操作オブジェクト。
+        config_raw (ruamel.yaml.CommentedMap): 保存する設定データ。
+    """
+
+    global _CONFIG_YAML_PATH
+
+    # None を null として出力するようにする
+    yaml.Representer.add_representer(type(None), lambda self, data: self.represent_scalar('tag:yaml.org,2002:null', 'null'))  # type: ignore
+
+    # 配列の末尾の "']" を "',\n    ]" に変換する transform 関数を定義
+    # 基本的に recorded_folders 用 (ruamel.yaml がフロースタイルの改行などを保持できないための苦肉の策)
+    def transform(value: str) -> str:
+        return value.replace("']", "',\n    ]")
+
+    with open(_CONFIG_YAML_PATH, mode='w', encoding='utf-8') as file:
+        yaml.dump(config_raw, file, transform=transform)
+
+
+def ApplyProgramTitleRegex(program_title_regex: str) -> None:
+    """
+    番組タイトルのシリーズ判定用正規表現を、実行中プロセスの設定へ即時反映する。
+
+    Args:
+        program_title_regex (str): 即時反映する正規表現。
+    """
+
+    validated_pattern = ProgramTitleParser.validatePattern(program_title_regex)
+    Config().video.program_title_regex = validated_pattern
+
+
+def SaveProgramTitleRegex(program_title_regex: str) -> None:
+    """
+    番組タイトルのシリーズ判定用正規表現だけを config.yaml へ保存し、実行中設定へ即時反映する。
+    他のサーバー設定が保存済み・再起動待ちでも、それらを古いメモリ値で上書きしないよう対象キーだけを更新する。
+
+    Args:
+        program_title_regex (str): 保存・即時反映する正規表現。
+    """
+
+    validated_pattern = ProgramTitleParser.validatePattern(program_title_regex)
+    yaml, config_raw = _LoadConfigYAML()
+
+    # video セクションが存在しない古い config.yaml でも、安全に正規表現設定を追加できるようにする
+    if 'video' not in config_raw or isinstance(config_raw['video'], ruamel.yaml.CommentedMap) is False:
+        config_raw['video'] = ruamel.yaml.CommentedMap()
+    config_raw['video']['program_title_regex'] = ruamel.yaml.scalarstring.SingleQuotedScalarString(validated_pattern)
+    _DumpConfigYAML(yaml, config_raw)
+
+    # 保存に成功した後でのみ実行中設定を更新し、ファイルとメモリの値を一致させる
+    ApplyProgramTitleRegex(validated_pattern)
+
+
 def SaveConfig(config: ServerSettings) -> None:
     """
     変更されたサーバー設定データを、コメントやフォーマットを保持した形で config.yaml に書き込む
@@ -545,17 +631,7 @@ def SaveConfig(config: ServerSettings) -> None:
             config_dict['tv']['debug_mode_ts_path'] = str(config_dict['tv']['debug_mode_ts_path']).replace(_DOCKER_PATH_PREFIX, '')
 
     # config.yaml の内容をロード
-    yaml = ruamel.yaml.YAML()
-    yaml.default_flow_style = None  # None を使うと、スカラー以外のものはブロックスタイルになる
-    yaml.preserve_quotes = True
-    yaml.width = 20
-    yaml.indent(mapping=4, sequence=4, offset=4)
-    try:
-        with open(_CONFIG_YAML_PATH, encoding='utf-8') as file:
-            config_raw = yaml.load(file)
-    except Exception as error:
-        # 回復不可能
-        raise RuntimeError(f'Failed to load config.yaml: {error}')
+    yaml, config_raw = _LoadConfigYAML()
 
     # config.yaml の内容を更新して保存
     # コメントやフォーマットを保持して保存するために更新方法を工夫している
@@ -584,16 +660,7 @@ def SaveConfig(config: ServerSettings) -> None:
             else:
                 config_raw[key][sub_key] = config_dict[key][sub_key]
 
-    # None を null として出力するようにする
-    yaml.Representer.add_representer(type(None), lambda self, data: self.represent_scalar('tag:yaml.org,2002:null', 'null'))  # type: ignore
-
-    # 配列の末尾の "']" を "',\n    ]" に変換する transform 関数を定義
-    # 基本的に recorded_folders 用 (ruamel.yaml がフロースタイルの改行などを保持できないための苦肉の策)
-    def transform(value: str) -> str:
-        return value.replace("']", "',\n    ]")
-
-    with open(_CONFIG_YAML_PATH, mode='w', encoding='utf-8') as file:
-        yaml.dump(config_raw, file, transform=transform)
+    _DumpConfigYAML(yaml, config_raw)
 
 
 def Config() -> ServerSettings:

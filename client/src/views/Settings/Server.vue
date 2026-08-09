@@ -262,10 +262,11 @@
                 <div class="settings__item-heading">番組タイトルのシリーズ判定用正規表現</div>
                 <div class="settings__item-label">
                     録画番組のタイトルからシリーズ名・話数・サブタイトルを抽出し、同じシリーズの録画をまとめるために利用します。<br>
+                    [字]・[解]・[新]・[終] などの既知の ARIB 番組付属情報は、元の番組タイトルを変更せず、判定前に自動で除去されます。<br>
                     大文字・小文字を区別せず、第1キャプチャをシリーズ名、第2キャプチャを話数、第3キャプチャをサブタイトルとして扱います。<br>
                 </div>
                 <div class="settings__item-label mt-1">
-                    保存した正規表現はサーバー再起動後に新しく解析される録画から適用されます。既存の録画には、下の「シリーズを再判定」から反映できます。<br>
+                    保存した正規表現はサーバーを再起動せず、今後新しく解析される録画から適用されます。既存の録画には、下の「シリーズを再判定」から反映できます。<br>
                 </div>
                 <v-textarea class="settings__item-form" color="primary" variant="outlined" hide-details auto-grow
                     rows="5" max-rows="12" style="font-family: monospace;"
@@ -312,9 +313,8 @@
                     </tbody>
                 </v-table>
                 <div class="settings__item-label mt-5">
-                    現在編集中の正規表現を使い、DB に保存済みの全録画番組のシリーズ名・話数・サブタイトルとシリーズへの紐付けを一括更新します。<br>
+                    現在編集中の正規表現を保存して今後の解析へ即時反映し、DB に保存済みの全録画番組のシリーズ名・話数・サブタイトルとシリーズへの紐付けを一括更新します。<br>
                     録画ファイル自体は再解析しないため、CM 区間情報・サムネイル・動画メタデータは変更されません。<br>
-                    今後解析される録画にも同じ正規表現を適用するには、上部の「設定を保存」も実行してサーバーを再起動してください。<br>
                 </div>
                 <v-btn class="mt-3" color="primary" variant="flat" height="40px"
                     :loading="is_program_title_reclassifying"
@@ -322,7 +322,7 @@
                         is_program_title_regex_testing || is_program_title_reclassifying"
                     @click="reclassifyProgramTitles()">
                     <Icon icon="fluent:arrow-sync-16-filled" height="18px" />
-                    <span class="ml-1">保存済み録画のシリーズを再判定</span>
+                    <span class="ml-1">正規表現を保存してシリーズを再判定</span>
                 </v-btn>
             </div>
             <div class="settings__content-heading mt-6">
@@ -690,7 +690,7 @@ async function testProgramTitleRegex() {
     }
 }
 
-// 現在編集中の正規表現を使い、保存済み録画番組のシリーズ関連情報だけを一括再判定する
+// 現在編集中の正規表現を保存・即時反映し、保存済み録画番組のシリーズ関連情報だけを一括再判定する
 async function reclassifyProgramTitles() {
     is_program_title_reclassifying.value = true;
     Message.info(
@@ -701,7 +701,7 @@ async function reclassifyProgramTitles() {
         const result = await Settings.reclassifyProgramTitles(server_settings.value.video.program_title_regex);
         if (result !== null) {
             Message.success(
-                '保存済み録画番組のシリーズ再判定が完了しました。\n' +
+                '正規表現の保存と、保存済み録画番組のシリーズ再判定が完了しました。\n' +
                 `全 ${result.total_count} 件 / 一致 ${result.matched_count} 件 / ` +
                 `不一致 ${result.unmatched_count} 件 / 変更 ${result.changed_count} 件`
             );
@@ -727,9 +727,12 @@ async function updateServerSettings() {
 
     // 成功した場合のみメッセージを表示
     // エラー処理は Services 層で行われるため、ここではエラー処理は不要
-    // 再起動するまでは設定データは反映されないため、再起動せずにページをリロードすると反映されてないように見える点に注意
+    // シリーズ判定用正規表現だけは即時反映され、それ以外の設定は再起動後に反映される
     if (result === true) {
-        Message.success('サーバー設定を更新しました。\n変更を反映するためには、KonomiTV サーバーを再起動してください。');
+        Message.success(
+            'サーバー設定を更新しました。\n' +
+            'シリーズ判定用正規表現はすぐに反映されます。その他の変更を反映するには、KonomiTV サーバーを再起動してください。'
+        );
     }
 }
 

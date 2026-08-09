@@ -1,7 +1,8 @@
 import asyncio
 import unittest
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
+from fastapi import HTTPException
 from tortoise import Tortoise
 
 from app import schemas
@@ -80,6 +81,81 @@ class SeriesMetadataTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    async def createSeriesProgram(
+        self,
+        series_title: str,
+        start_time: datetime,
+        event_id: int,
+    ) -> RecordedProgram:
+        """
+        一覧 API のテストに利用するシリーズ・録画番組・録画ファイルを作成する。
+
+        Args:
+            series_title (str): シリーズ名。
+            start_time (datetime): 番組開始日時。
+            event_id (int): テスト内で一意なイベント ID。
+
+        Returns:
+            RecordedProgram: 作成した録画番組。
+        """
+
+        series_id, broadcast_period_id = await self.resolveSeriesMetadata(series_title, start_time)
+        assert series_id is not None
+        assert broadcast_period_id is not None
+
+        db_program = RecordedProgram(
+            recording_start_margin = 0.0,
+            recording_end_margin = 0.0,
+            is_partially_recorded = False,
+            channel = self.channel,
+            network_id = self.channel.network_id,
+            service_id = self.channel.service_id,
+            event_id = event_id,
+            series_id = series_id,
+            series_broadcast_period_id = broadcast_period_id,
+            title = f'{series_title} #{event_id}',
+            series_title = series_title,
+            episode_number = str(event_id),
+            subtitle = f'第{event_id}話',
+            description = f'{series_title} の概要',
+            detail = {},
+            start_time = start_time,
+            end_time = start_time + timedelta(minutes=30),
+            duration = 1800.0,
+            is_free = True,
+            genres = [{'major': 'アニメ・特撮', 'middle': '国内アニメ'}],
+            primary_audio_type = '2/0モード(ステレオ)',
+            primary_audio_language = '日本語',
+            secondary_audio_type = None,
+            secondary_audio_language = None,
+        )
+        await db_program.save()
+
+        await RecordedVideo.create(
+            recorded_program = db_program,
+            status = 'Recorded',
+            file_path = f'/recorded/series-{event_id}.ts',
+            file_hash = f'{event_id:032x}',
+            file_size = 1024,
+            file_created_at = start_time,
+            file_modified_at = start_time,
+            recording_start_time = start_time,
+            recording_end_time = start_time + timedelta(minutes=30),
+            duration = 1800.0,
+            container_format = 'MPEG-TS',
+            video_codec = 'MPEG-2',
+            video_codec_profile = 'Main',
+            video_scan_type = 'Interlaced',
+            video_frame_rate = 29.97,
+            video_resolution_width = 1920,
+            video_resolution_height = 1080,
+            primary_audio_codec = 'AAC-LC',
+            primary_audio_channel = 'Stereo',
+            primary_audio_sampling_rate = 48000,
+        )
+        return db_program
+
+
     async def test_same_title_is_grouped_into_one_series(self) -> None:
         first_series_id, first_period_id = await self.resolveSeriesMetadata(
             'テストアニメ',
@@ -112,6 +188,52 @@ class SeriesMetadataTest(unittest.IsolatedAsyncioTestCase):
         db_period = await SeriesBroadcastPeriod.get(id=merged_period_id)
         self.assertEqual(db_period.start_date.isoformat(), '2026-01-01')
         self.assertEqual(db_period.end_date.isoformat(), '2026-06-30')
+
+
+    async def test_series_list_sorting_and_broadcast_date_filter(self) -> None:
+        await self.createSeriesProgram('Series A', datetime(2025, 1, 10, 23, 30, tzinfo=JST), 1)
+        await self.createSeriesProgram('Series B', datetime(2026, 4, 15, 12, 0, tzinfo=JST), 2)
+        await self.createSeriesProgram('Series C', datetime(2026, 7, 20, 1, 0, tzinfo=JST), 3)
+        await self.createSeriesProgram('Series B', datetime(2026, 4, 20, 21, 0, tzinfo=JST), 4)
+
+        # 最終放送日時の降順・昇順とタイトル順をそれぞれ確認する
+        recent_response = await SeriesListAPI(sort='broadcasted_at', order='desc', page=1)
+        self.assertEqual([series.title for series in recent_response.series_list], ['Series C', 'Series B', 'Series A'])
+
+        oldest_response = await SeriesListAPI(sort='broadcasted_at', order='asc', page=1)
+        self.assertEqual([series.title for series in oldest_response.series_list], ['Series A', 'Series B', 'Series C'])
+
+        title_response = await SeriesListAPI(sort='title', order='asc', page=1)
+        self.assertEqual([series.title for series in title_response.series_list], ['Series A', 'Series B', 'Series C'])
+
+        # 開始・終了日はいずれも境界を含み、検索 API にも同じ放送日条件が適用される
+        filtered_response = await SeriesListAPI(
+            sort = 'broadcasted_at',
+            order = 'desc',
+            broadcast_start_date = date(2026, 4, 15),
+            broadcast_end_date = date(2026, 4, 15),
+            page = 1,
+        )
+        self.assertEqual(filtered_response.total, 1)
+        self.assertEqual([series.title for series in filtered_response.series_list], ['Series B'])
+
+        search_response = await SeriesSearchAPI(
+            query = 'Series',
+            sort = 'broadcasted_at',
+            order = 'desc',
+            broadcast_start_date = date(2026, 4, 1),
+            broadcast_end_date = date(2026, 4, 30),
+            page = 1,
+        )
+        self.assertEqual(search_response.total, 1)
+        self.assertEqual([series.title for series in search_response.series_list], ['Series B'])
+
+        # 逆転した日付範囲は入力エラーとして扱う
+        with self.assertRaises(HTTPException):
+            await SeriesListAPI(
+                broadcast_start_date = date(2026, 5, 1),
+                broadcast_end_date = date(2026, 4, 1),
+            )
 
 
     async def test_reclassification_does_not_modify_recorded_video_metadata(self) -> None:

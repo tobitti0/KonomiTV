@@ -13,7 +13,7 @@
             <h3 class="series-card__title">{{series.title}}</h3>
             <div class="series-card__meta">
                 <span>{{broadcastPeriodCount}}放送期間</span>
-                <span v-if="representativeProgram !== null">{{dayjs(representativeProgram.start_time).format('YYYY年')}}</span>
+                <span v-if="latestProgram !== null">最新 {{dayjs(latestProgram.start_time).format('YYYY/M/D')}}</span>
             </div>
             <div class="series-card__description">{{series.description}}</div>
         </div>
@@ -30,9 +30,12 @@ const props = defineProps<{
     series: ISeries;
 }>();
 
+const allPrograms = computed(() => SeriesUtils.getAllPrograms(props.series));
+
 // カードの代表画像には、シリーズ内で最も新しい再生可能な録画番組を利用する
 const representativeProgram = computed(() => SeriesUtils.getRepresentativeProgram(props.series));
-const programCount = computed(() => SeriesUtils.getAllPrograms(props.series).length);
+const latestProgram = computed(() => allPrograms.value[allPrograms.value.length - 1] ?? null);
+const programCount = computed(() => allPrograms.value.length);
 const broadcastPeriodCount = computed(() => props.series.broadcast_periods.length);
 
 </script>
