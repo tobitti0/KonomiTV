@@ -258,6 +258,73 @@
                     <span class="ml-1">除外フォルダを追加</span>
                 </v-btn>
             </div>
+            <div class="settings__item">
+                <div class="settings__item-heading">番組タイトルのシリーズ判定用正規表現</div>
+                <div class="settings__item-label">
+                    録画番組のタイトルからシリーズ名・話数・サブタイトルを抽出し、同じシリーズの録画をまとめるために利用します。<br>
+                    大文字・小文字を区別せず、第1キャプチャをシリーズ名、第2キャプチャを話数、第3キャプチャをサブタイトルとして扱います。<br>
+                </div>
+                <div class="settings__item-label mt-1">
+                    保存した正規表現はサーバー再起動後に新しく解析される録画から適用されます。既存の録画には、下の「シリーズを再判定」から反映できます。<br>
+                </div>
+                <v-textarea class="settings__item-form" color="primary" variant="outlined" hide-details auto-grow
+                    rows="5" max-rows="12" style="font-family: monospace;"
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    v-model="server_settings.video.program_title_regex">
+                </v-textarea>
+                <div class="settings__item-label mt-4">
+                    下欄へ1行につき1件の番組タイトルを入力すると、現在編集中の正規表現を保存せずにテストできます（最大100件）。<br>
+                </div>
+                <v-textarea class="settings__item-form mt-2" color="primary" variant="outlined" hide-details auto-grow
+                    rows="4" max-rows="10" placeholder="例: アリス・ギア・アイギス Expansion #01「さらば成子坂製作所!」"
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    v-model="program_title_regex_test_titles">
+                </v-textarea>
+                <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
+                    :loading="is_program_title_regex_testing"
+                    :disabled="program_title_regex_test_titles.trim() === ''"
+                    @click="testProgramTitleRegex()">
+                    <Icon icon="fluent:checkmark-circle-16-filled" height="18px" />
+                    <span class="ml-1">正規表現をテスト</span>
+                </v-btn>
+                <v-table v-if="program_title_regex_test_results !== null" class="mt-4" density="compact">
+                    <thead>
+                        <tr>
+                            <th>判定</th>
+                            <th>番組タイトル</th>
+                            <th>シリーズ名</th>
+                            <th>話数</th>
+                            <th>サブタイトル</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(result, index) in program_title_regex_test_results" :key="'program-title-regex-result-' + index">
+                            <td>
+                                <v-chip :color="result.matched ? 'primary' : 'error'" size="small">
+                                    {{ result.matched ? '一致' : '不一致' }}
+                                </v-chip>
+                            </td>
+                            <td>{{ result.title }}</td>
+                            <td>{{ result.series_title ?? '—' }}</td>
+                            <td>{{ result.episode_number ?? '—' }}</td>
+                            <td>{{ result.subtitle ?? '—' }}</td>
+                        </tr>
+                    </tbody>
+                </v-table>
+                <div class="settings__item-label mt-5">
+                    現在編集中の正規表現を使い、DB に保存済みの全録画番組のシリーズ名・話数・サブタイトルとシリーズへの紐付けを一括更新します。<br>
+                    録画ファイル自体は再解析しないため、CM 区間情報・サムネイル・動画メタデータは変更されません。<br>
+                    今後解析される録画にも同じ正規表現を適用するには、上部の「設定を保存」も実行してサーバーを再起動してください。<br>
+                </div>
+                <v-btn class="mt-3" color="primary" variant="flat" height="40px"
+                    :loading="is_program_title_reclassifying"
+                    :disabled="server_settings.video.program_title_regex.trim() === '' ||
+                        is_program_title_regex_testing || is_program_title_reclassifying"
+                    @click="reclassifyProgramTitles()">
+                    <Icon icon="fluent:arrow-sync-16-filled" height="18px" />
+                    <span class="ml-1">保存済み録画のシリーズを再判定</span>
+                </v-btn>
+            </div>
             <div class="settings__content-heading mt-6">
                 <Icon icon="fluent:image-multiple-16-filled" width="22px" />
                 <span class="ml-2">キャプチャ</span>
@@ -419,7 +486,11 @@ import AccountManageSettings from '@/components/Settings/AccountManageSettings.v
 import ServerLogDialog from '@/components/Settings/ServerLogDialog.vue';
 import Message from '@/message';
 import Maintenance from '@/services/Maintenance';
-import Settings, { IServerSettings, IServerSettingsDefault } from '@/services/Settings';
+import Settings, {
+    IProgramTitleRegexTestResult,
+    IServerSettings,
+    IServerSettingsDefault,
+} from '@/services/Settings';
 import Version from '@/services/Version';
 import useUserStore from '@/stores/UserStore';
 import Utils from '@/utils';
@@ -502,6 +573,64 @@ Settings.fetchServerSettings().then((settings) => {
         server_settings.value = settings;
     }
 });
+
+// 番組タイトルのシリーズ判定用正規表現テスターの入力と結果
+const program_title_regex_test_titles = ref([
+    'アリス・ギア・アイギス Expansion #01「さらば成子坂製作所!」',
+    '転生したらスライムだった件 第2期 第2部 第37話「訪れる者たち」',
+    'TVアニメ「アイドルマスター シンデレラガールズ U149」 第1話',
+].join('\n'));
+const program_title_regex_test_results = ref<IProgramTitleRegexTestResult[] | null>(null);
+const is_program_title_regex_testing = ref(false);
+const is_program_title_reclassifying = ref(false);
+
+// 現在編集中の正規表現を、入力された各番組タイトルに対してテストする
+async function testProgramTitleRegex() {
+    const titles = program_title_regex_test_titles.value
+        .split('\n')
+        .map(title => title.trim())
+        .filter(title => title !== '');
+
+    if (titles.length === 0) {
+        Message.error('テストする番組タイトルを入力してください。');
+        return;
+    }
+    if (titles.length > 100) {
+        Message.error('一度にテストできる番組タイトルは100件までです。');
+        return;
+    }
+
+    is_program_title_regex_testing.value = true;
+    try {
+        program_title_regex_test_results.value = await Settings.testProgramTitleRegex(
+            server_settings.value.video.program_title_regex,
+            titles,
+        );
+    } finally {
+        is_program_title_regex_testing.value = false;
+    }
+}
+
+// 現在編集中の正規表現を使い、保存済み録画番組のシリーズ関連情報だけを一括再判定する
+async function reclassifyProgramTitles() {
+    is_program_title_reclassifying.value = true;
+    Message.info(
+        '保存済み録画番組のシリーズ再判定を開始しました。\n' +
+        '録画件数が多い環境では、完了まで時間がかかることがあります。'
+    );
+    try {
+        const result = await Settings.reclassifyProgramTitles(server_settings.value.video.program_title_regex);
+        if (result !== null) {
+            Message.success(
+                '保存済み録画番組のシリーズ再判定が完了しました。\n' +
+                `全 ${result.total_count} 件 / 一致 ${result.matched_count} 件 / ` +
+                `不一致 ${result.unmatched_count} 件 / 変更 ${result.changed_count} 件`
+            );
+        }
+    } finally {
+        is_program_title_reclassifying.value = false;
+    }
+}
 
 // サーバー設定を更新する関数
 async function updateServerSettings() {
@@ -590,4 +719,3 @@ async function shutdownServer() {
 }
 
 </script>
-

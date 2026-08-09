@@ -1,10 +1,13 @@
 
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 
-from app import logging
+from app import logging, schemas
 from app.config import ClientSettings, Config, SaveConfig, ServerSettings
+from app.metadata.ProgramTitleParser import ProgramTitleParser
+from app.metadata.RecordedScanTask import RecordedScanTask
 from app.models.User import User
 from app.routers.UsersRouter import GetCurrentAdminUser, GetCurrentUser
 
@@ -14,6 +17,9 @@ router = APIRouter(
     tags = ['Settings'],
     prefix = '/api/settings',
 )
+
+# 保存済み録画番組のシリーズ一括再判定タスク
+program_title_reclassification_task: asyncio.Task[schemas.ProgramTitleReclassificationResult] | None = None
 
 
 @router.get(
@@ -97,3 +103,77 @@ async def ServerSettingsUpdateAPI(
 
     # バリデーションが完了したサーバー設定を config.yaml に保存する
     SaveConfig(server_settings)
+
+
+@router.post(
+    '/server/program-title-regex/test',
+    summary = '番組タイトルのシリーズ判定用正規表現テスト API',
+    response_description = '各番組タイトルの正規表現による解析結果。',
+    response_model = schemas.ProgramTitleRegexTestResponse,
+)
+async def ProgramTitleRegexTestAPI(
+    request: Annotated[schemas.ProgramTitleRegexTestRequest, Body(description='テストする正規表現と番組タイトルのリスト。')],
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+):
+    """
+    未保存の番組タイトル解析用正規表現を、複数の番組タイトルに対してテストする。<br>
+    第1キャプチャをシリーズ名、第2キャプチャを話数、第3キャプチャをサブタイトルとして返す。<br>
+
+    JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
+    """
+
+    results: list[schemas.ProgramTitleRegexTestResult] = []
+    for title in request.titles:
+        parsed_title = ProgramTitleParser.parse(title=title, pattern=request.pattern)
+        results.append(schemas.ProgramTitleRegexTestResult(
+            title = title,
+            matched = parsed_title is not None,
+            series_title = parsed_title.series_title if parsed_title is not None else None,
+            episode_number = parsed_title.episode_number if parsed_title is not None else None,
+            subtitle = parsed_title.subtitle if parsed_title is not None else None,
+        ))
+
+    return schemas.ProgramTitleRegexTestResponse(results=results)
+
+
+@router.post(
+    '/server/program-title-regex/reclassify',
+    summary = '保存済み録画番組のシリーズ一括再判定 API',
+    response_description = '保存済み録画番組のシリーズ再判定結果。',
+    response_model = schemas.ProgramTitleReclassificationResult,
+)
+async def ProgramTitleReclassificationAPI(
+    request: Annotated[
+        schemas.ProgramTitleReclassificationRequest,
+        Body(description='シリーズ再判定に利用する番組タイトル解析用正規表現。'),
+    ],
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+):
+    """
+    DB に保存済みの録画番組タイトルを指定された正規表現で再解析し、シリーズへの紐付けを一括更新する。<br>
+    録画ファイルの再解析は行わないため、CM 区間情報・サムネイル・動画メタデータは変更されない。<br>
+
+    JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
+    """
+
+    global program_title_reclassification_task
+
+    async def ProgramTitleReclassification() -> schemas.ProgramTitleReclassificationResult:
+        global program_title_reclassification_task
+        try:
+            return await RecordedScanTask().reclassifySeries(request.pattern)
+        finally:
+            # 成否を問わず、次回の再判定を開始できる状態へ戻す
+            program_title_reclassification_task = None
+
+    # 同じ全件更新処理が重複して走ると結果件数やシリーズ紐付けが競合するため、同時実行は許可しない
+    if program_title_reclassification_task is not None:
+        logging.warning('[SettingsRouter][ProgramTitleReclassificationAPI] Series reclassification is already running.')
+        raise HTTPException(
+            status_code = status.HTTP_429_TOO_MANY_REQUESTS,
+            detail = 'Series reclassification is already running',
+        )
+
+    # HTTP コネクションが途中で切断されても DB 更新を最後まで完了またはロールバックできるよう独立タスクで実行する
+    program_title_reclassification_task = asyncio.create_task(ProgramTitleReclassification())
+    return await asyncio.shield(program_title_reclassification_task)

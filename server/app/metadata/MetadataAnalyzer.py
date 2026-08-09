@@ -14,6 +14,7 @@ from rich import print
 from app import logging, schemas
 from app.config import Config, LoadConfig
 from app.constants import JST, LIBRARY_PATH
+from app.metadata.ProgramTitleParser import ProgramTitleParser
 from app.metadata.TSInfoAnalyzer import TSInfoAnalyzer
 from app.utils import ClosestMultiple
 from app.utils.TSInformation import TSInformation
@@ -619,6 +620,17 @@ class MetadataAnalyzer:
                 recorded_program.is_partially_recorded = True
             else:
                 recorded_program.is_partially_recorded = False
+
+        # EIT またはファイル名から取得した番組タイトルを、設定された正規表現でシリーズ情報へ分解する
+        ## ここで解析することで、TSInfoAnalyzer から取得できた番組だけでなく、ファイル名へフォールバックした番組も同じ規則で扱える
+        parsed_program_title = ProgramTitleParser.parse(
+            title = recorded_program.title,
+            pattern = Config().video.program_title_regex,
+        )
+        if parsed_program_title is not None:
+            recorded_program.series_title = parsed_program_title.series_title
+            recorded_program.episode_number = parsed_program_title.episode_number
+            recorded_program.subtitle = parsed_program_title.subtitle
 
         return recorded_program
 

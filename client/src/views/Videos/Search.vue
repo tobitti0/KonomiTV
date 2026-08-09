@@ -11,8 +11,13 @@
                         { name: 'ビデオをみる', path: '/videos/' },
                         { name: '検索結果', path: `/videos/search?query=${encodeURIComponent(query)}`, disabled: true },
                     ]" />
+                    <SeriesList v-if="is_loading || totalSeries > 0" class="videos-search-container__series"
+                        title="シリーズの検索結果" :seriesList="seriesList.slice(0, 10)" :total="totalSeries"
+                        layout="Carousel" :hidePagination="true" :showMoreButton="totalSeries > 10"
+                        :showEmptyMessage="false" :isLoading="is_loading"
+                        @more="$router.push(`/videos/series?query=${encodeURIComponent(query)}`)" />
                     <RecordedProgramList
-                        :title="Utils.isSmartphoneVertical() ? '検索結果' : `「${query}」の検索結果`"
+                        :title="Utils.isSmartphoneVertical() ? '録画番組' : `「${query}」の録画番組検索結果`"
                         :programs="programs"
                         :total="total_programs"
                         :page="current_page"
@@ -28,7 +33,7 @@
                         @update:sortOrder="updateSortOrder($event as SortOrder)"
                         :emptyMessage="`「${query}」に一致する録画番組は<br class='d-sm-none'>見つかりませんでした。`"
                         :emptySubMessage="'別のキーワードで検索をお試しください。'"
-                        :showEmptyMessage="!is_loading" />
+                        :showEmptyMessage="!is_loading && totalSeries === 0" />
                 </div>
             </div>
         </main>
@@ -44,6 +49,8 @@ import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
 import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import RecordedProgramList from '@/components/Videos/RecordedProgramList.vue';
+import SeriesList from '@/components/Videos/SeriesList.vue';
+import SeriesService, { ISeries } from '@/services/Series';
 import { IRecordedProgram, SortOrder } from '@/services/Videos';
 import Videos from '@/services/Videos';
 import useUserStore from '@/stores/UserStore';
@@ -59,6 +66,8 @@ const query = ref('');
 // 録画番組のリスト
 const programs = ref<IRecordedProgram[]>([]);
 const total_programs = ref(0);
+const seriesList = ref<ISeries[]>([]);
+const totalSeries = ref(0);
 const is_loading = ref(true);
 const is_searching = ref(true);
 
@@ -70,11 +79,19 @@ const sort_order = ref<'desc' | 'asc'>('desc');
 
 // 録画番組を検索
 const searchPrograms = async () => {
+    is_loading.value = true;
     is_searching.value = true;  // 検索開始時に検索中フラグを立てる
-    const result = await Videos.searchVideos(query.value, sort_order.value, current_page.value);
-    if (result) {
-        programs.value = result.recorded_programs;
-        total_programs.value = result.total;
+    const [programResult, seriesResult] = await Promise.all([
+        Videos.searchVideos(query.value, sort_order.value, current_page.value),
+        SeriesService.searchSeries(query.value, 'desc', 1),
+    ]);
+    if (programResult) {
+        programs.value = programResult.recorded_programs;
+        total_programs.value = programResult.total;
+    }
+    if (seriesResult) {
+        seriesList.value = seriesResult.series_list;
+        totalSeries.value = seriesResult.total;
     }
     is_loading.value = false;
     is_searching.value = false;  // 検索完了時に検索中フラグを下ろす
@@ -113,7 +130,7 @@ watch(() => route.query, async (newQuery) => {
     if (newQuery.query !== query.value) {
         current_page.value = 1;
     }
-    query.value = newQuery.query as string;
+    query.value = typeof newQuery.query === 'string' ? newQuery.query : '';
     await searchPrograms();
 }, { deep: true });
 
@@ -124,7 +141,7 @@ onMounted(async () => {
     await userStore.fetchUser();
 
     // クエリパラメータから初期値を設定
-    query.value = route.query.query as string;
+    query.value = typeof route.query.query === 'string' ? route.query.query : '';
     if (route.query.page) {
         current_page.value = parseInt(route.query.page as string);
     }
@@ -165,6 +182,10 @@ onMounted(async () => {
         padding: 16px 8px !important;
         padding-top: 8px !important;
     }
+}
+
+.videos-search-container__series {
+    margin-bottom: 28px;
 }
 
 </style>
