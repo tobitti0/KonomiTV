@@ -6,11 +6,11 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 
 from app import logging, schemas
 from app.config import (
-    ApplyProgramTitleRegex,
+    ApplyProgramTitleRegexes,
     ClientSettings,
     Config,
     SaveConfig,
-    SaveProgramTitleRegex,
+    SaveProgramTitleRegexes,
     ServerSettings,
 )
 from app.metadata.ProgramTitleParser import ProgramTitleParser
@@ -111,9 +111,9 @@ async def ServerSettingsUpdateAPI(
     # バリデーションが完了したサーバー設定を config.yaml に保存する
     SaveConfig(server_settings)
 
-    # 番組タイトルのシリーズ判定用正規表現は、サーバーを再起動せず今後の解析へ反映する
+    # 番組タイトルのシリーズ判定用正規表現ルール一覧は、サーバーを再起動せず今後の解析へ反映する
     # ほかの設定は従来どおりサーバー再起動後に反映される
-    ApplyProgramTitleRegex(server_settings.video.program_title_regex)
+    ApplyProgramTitleRegexes(server_settings.video.program_title_regexes)
 
 
 @router.post(
@@ -123,11 +123,14 @@ async def ServerSettingsUpdateAPI(
     response_model = schemas.ProgramTitleRegexTestResponse,
 )
 async def ProgramTitleRegexTestAPI(
-    request: Annotated[schemas.ProgramTitleRegexTestRequest, Body(description='テストする正規表現と番組タイトルのリスト。')],
+    request: Annotated[
+        schemas.ProgramTitleRegexTestRequest,
+        Body(description='テストする正規表現ルール一覧と番組タイトルのリスト。'),
+    ],
     current_user: Annotated[User, Depends(GetCurrentAdminUser)],
 ):
     """
-    未保存の番組タイトル解析用正規表現を、複数の番組タイトルに対してテストする。<br>
+    未保存の番組タイトル解析用正規表現ルール一覧を、複数の番組タイトルに対してテストする。<br>
     第1キャプチャをシリーズ名、第2キャプチャを話数、第3キャプチャをサブタイトルとして返す。<br>
 
     JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
@@ -135,10 +138,17 @@ async def ProgramTitleRegexTestAPI(
 
     results: list[schemas.ProgramTitleRegexTestResult] = []
     for title in request.titles:
-        parsed_title = ProgramTitleParser.parse(title=title, pattern=request.pattern)
+        parsed_title = ProgramTitleParser.parseWithRules(title=title, rules=request.rules)
+        matched_rule_index = parsed_title.matched_rule_index if parsed_title is not None else None
         results.append(schemas.ProgramTitleRegexTestResult(
             title = title,
             matched = parsed_title is not None,
+            matched_rule_index = matched_rule_index,
+            matched_rule_name = (
+                request.rules[matched_rule_index].name
+                if matched_rule_index is not None
+                else None
+            ),
             series_title = parsed_title.series_title if parsed_title is not None else None,
             episode_number = parsed_title.episode_number if parsed_title is not None else None,
             subtitle = parsed_title.subtitle if parsed_title is not None else None,
@@ -156,12 +166,12 @@ async def ProgramTitleRegexTestAPI(
 async def ProgramTitleReclassificationAPI(
     request: Annotated[
         schemas.ProgramTitleReclassificationRequest,
-        Body(description='シリーズ再判定に利用する番組タイトル解析用正規表現。'),
+        Body(description='シリーズ再判定に利用する番組タイトル解析用正規表現ルール一覧。'),
     ],
     current_user: Annotated[User, Depends(GetCurrentAdminUser)],
 ):
     """
-    指定された正規表現を config.yaml へ保存・即時反映した上で、DB に保存済みの録画番組タイトルを再解析し、シリーズへの紐付けを一括更新する。<br>
+    指定された正規表現ルール一覧を config.yaml へ保存・即時反映した上で、DB に保存済みの録画番組タイトルを再解析し、シリーズへの紐付けを一括更新する。<br>
     録画ファイルの再解析は行わないため、CM 区間情報・サムネイル・動画メタデータは変更されない。<br>
 
     JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
@@ -172,7 +182,7 @@ async def ProgramTitleReclassificationAPI(
     async def ProgramTitleReclassification() -> schemas.ProgramTitleReclassificationResult:
         global program_title_reclassification_task
         try:
-            return await RecordedScanTask().reclassifySeries(request.pattern)
+            return await RecordedScanTask().reclassifySeries(request.rules)
         finally:
             # 成否を問わず、次回の再判定を開始できる状態へ戻す
             program_title_reclassification_task = None
@@ -185,9 +195,9 @@ async def ProgramTitleReclassificationAPI(
             detail = 'Series reclassification is already running',
         )
 
-    # 再判定に使う正規表現を保存し、今後新しく解析される録画にも即時反映する
+    # 再判定に使う正規表現ルール一覧を保存し、今後新しく解析される録画にも即時反映する
     # 保存に失敗した場合はシリーズ再判定を開始しない
-    SaveProgramTitleRegex(request.pattern)
+    SaveProgramTitleRegexes(request.rules)
 
     # HTTP コネクションが途中で切断されても DB 更新を最後まで完了またはロールバックできるよう独立タスクで実行する
     program_title_reclassification_task = asyncio.create_task(ProgramTitleReclassification())

@@ -15,6 +15,7 @@ import ruamel.yaml.scalarstring
 from pydantic import (
     BaseModel,
     DirectoryPath,
+    Field,
     FilePath,
     PositiveFloat,
     PositiveInt,
@@ -23,6 +24,7 @@ from pydantic import (
     ValidationInfo,
     confloat,
     field_validator,
+    model_validator,
 )
 from pydantic_core import Url
 
@@ -32,8 +34,10 @@ from app.constants import (
     LIBRARY_PATH,
 )
 from app.metadata.ProgramTitleParser import (
-    DEFAULT_PROGRAM_TITLE_REGEX,
+    DEFAULT_PROGRAM_TITLE_QUOTED_SUBTITLE_REGEX,
+    DEFAULT_PROGRAM_TITLE_REGEX_RULES,
     ProgramTitleParser,
+    ProgramTitleRegexRule,
 )
 from app.utils.TSInformation import TerrestrialRegion
 
@@ -354,22 +358,60 @@ class _ServerSettingsTV(BaseModel):
 class _ServerSettingsVideo(BaseModel):
     recorded_folders: list[DirectoryPath] = []
     exclude_scan_paths: list[str] = []
-    program_title_regex: str = DEFAULT_PROGRAM_TITLE_REGEX
+    program_title_regexes: Annotated[list[ProgramTitleRegexRule], Field(min_length=1, max_length=50)] = (
+        DEFAULT_PROGRAM_TITLE_REGEX_RULES
+    )
 
-    @field_validator('program_title_regex')
+    @model_validator(mode='before')
     @classmethod
-    def validate_program_title_regex(cls, program_title_regex: str) -> str:
+    def migrate_legacy_program_title_regex(cls, values: Any) -> Any:
         """
-        番組タイトルのシリーズ判定用正規表現を検証する。
+        旧形式の単一正規表現を、優先順位付きルール一覧へ移行する。
 
         Args:
-            program_title_regex (str): 検証対象の正規表現。
+            values (Any): Pydantic に渡された video セクションの設定値。
 
         Returns:
-            str: 検証済みの正規表現。
+            Any: 旧設定が存在する場合はルール一覧へ変換した設定値。
         """
 
-        return ProgramTitleParser.validatePattern(program_title_regex)
+        if isinstance(values, dict) and 'program_title_regexes' not in values:
+            legacy_pattern = values.get('program_title_regex')
+            if isinstance(legacy_pattern, str):
+                migrated_values = dict(values)
+                migrated_values['program_title_regexes'] = [
+                    {
+                        'name': '従来の正規表現',
+                        'pattern': legacy_pattern,
+                        'enabled': True,
+                    },
+                    {
+                        'name': '話数なしのサブタイトル付き番組',
+                        'pattern': DEFAULT_PROGRAM_TITLE_QUOTED_SUBTITLE_REGEX,
+                        'enabled': True,
+                    },
+                ]
+                return migrated_values
+        return values
+
+    @field_validator('program_title_regexes')
+    @classmethod
+    def validate_program_title_regexes(
+        cls,
+        program_title_regexes: list[ProgramTitleRegexRule],
+    ) -> list[ProgramTitleRegexRule]:
+        """
+        番組タイトルのシリーズ判定用正規表現ルール一覧を検証する。
+
+        Args:
+            program_title_regexes (list[ProgramTitleRegexRule]): 検証対象の正規表現ルール一覧。
+
+        Returns:
+            list[ProgramTitleRegexRule]: 検証済みの正規表現ルール一覧。
+        """
+
+        ProgramTitleParser.validateRules(program_title_regexes)
+        return program_title_regexes
 
 class _ServerSettingsCapture(BaseModel):
     upload_folders: list[DirectoryPath] = []
@@ -431,8 +473,33 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
                     merged_dict[key] = value
             return merged_dict
 
+        # デフォルト値を加える前に旧形式を移行しないと、デフォルトの program_title_regexes が先に補完されて
+        # ユーザーが保存していた program_title_regex を見失うため、video セクションだけ先に変換する
+        migrated_config_dict = dict(config_dict)
+        video_config = migrated_config_dict.get('video')
+        if (
+            isinstance(video_config, dict) and
+            'program_title_regexes' not in video_config and
+            isinstance(video_config.get('program_title_regex'), str)
+        ):
+            migrated_video_config = dict(video_config)
+            legacy_pattern = migrated_video_config.pop('program_title_regex')
+            migrated_video_config['program_title_regexes'] = [
+                {
+                    'name': '従来の正規表現',
+                    'pattern': legacy_pattern,
+                    'enabled': True,
+                },
+                {
+                    'name': '話数なしのサブタイトル付き番組',
+                    'pattern': DEFAULT_PROGRAM_TITLE_QUOTED_SUBTITLE_REGEX,
+                    'enabled': True,
+                },
+            ]
+            migrated_config_dict['video'] = migrated_video_config
+
         default_config_dict = ServerSettings().model_dump(mode='json')
-        return merge_dicts(default_config_dict, config_dict)
+        return merge_dicts(default_config_dict, migrated_config_dict)
 
     global _CONFIG, _CONFIG_YAML_PATH, _DOCKER_PATH_PREFIX
     assert _CONFIG is None, 'LoadConfig() has already been called.'
@@ -534,7 +601,8 @@ def _LoadConfigYAML() -> tuple[ruamel.yaml.YAML, ruamel.yaml.CommentedMap]:
     yaml.default_flow_style = None  # None を使うと、スカラー以外のものはブロックスタイルになる
     yaml.preserve_quotes = True
     yaml.width = 20
-    yaml.indent(mapping=4, sequence=4, offset=4)
+    # sequence の offset は mapping のインデント幅より小さくし、辞書を含むリストも正しい YAML として出力する
+    yaml.indent(mapping=4, sequence=4, offset=2)
     try:
         with open(_CONFIG_YAML_PATH, encoding='utf-8') as file:
             config_raw = yaml.load(file)
@@ -569,38 +637,51 @@ def _DumpConfigYAML(yaml: ruamel.yaml.YAML, config_raw: ruamel.yaml.CommentedMap
         yaml.dump(config_raw, file, transform=transform)
 
 
-def ApplyProgramTitleRegex(program_title_regex: str) -> None:
+def ApplyProgramTitleRegexes(program_title_regexes: list[ProgramTitleRegexRule]) -> None:
     """
-    番組タイトルのシリーズ判定用正規表現を、実行中プロセスの設定へ即時反映する。
+    番組タイトルのシリーズ判定用正規表現ルール一覧を、実行中プロセスの設定へ即時反映する。
 
     Args:
-        program_title_regex (str): 即時反映する正規表現。
+        program_title_regexes (list[ProgramTitleRegexRule]): 即時反映する正規表現ルール一覧。
     """
 
-    validated_pattern = ProgramTitleParser.validatePattern(program_title_regex)
-    Config().video.program_title_regex = validated_pattern
+    ProgramTitleParser.validateRules(program_title_regexes)
+    Config().video.program_title_regexes = [rule.model_copy(deep=True) for rule in program_title_regexes]
 
 
-def SaveProgramTitleRegex(program_title_regex: str) -> None:
+def SaveProgramTitleRegexes(program_title_regexes: list[ProgramTitleRegexRule]) -> None:
     """
-    番組タイトルのシリーズ判定用正規表現だけを config.yaml へ保存し、実行中設定へ即時反映する。
+    番組タイトルのシリーズ判定用正規表現ルール一覧だけを config.yaml へ保存し、実行中設定へ即時反映する。
     他のサーバー設定が保存済み・再起動待ちでも、それらを古いメモリ値で上書きしないよう対象キーだけを更新する。
 
     Args:
-        program_title_regex (str): 保存・即時反映する正規表現。
+        program_title_regexes (list[ProgramTitleRegexRule]): 保存・即時反映する正規表現ルール一覧。
     """
 
-    validated_pattern = ProgramTitleParser.validatePattern(program_title_regex)
+    ProgramTitleParser.validateRules(program_title_regexes)
     yaml, config_raw = _LoadConfigYAML()
 
-    # video セクションが存在しない古い config.yaml でも、安全に正規表現設定を追加できるようにする
+    # video セクションが存在しない古い config.yaml でも、安全に正規表現ルール一覧を追加できるようにする
     if 'video' not in config_raw or isinstance(config_raw['video'], ruamel.yaml.CommentedMap) is False:
         config_raw['video'] = ruamel.yaml.CommentedMap()
-    config_raw['video']['program_title_regex'] = ruamel.yaml.scalarstring.SingleQuotedScalarString(validated_pattern)
+
+    # 正規表現内の # や : を YAML の構文として解釈させないよう、名前とパターンは必ずシングルクォートで保存する
+    serialized_rules = ruamel.yaml.CommentedSeq()
+    for rule in program_title_regexes:
+        serialized_rule = ruamel.yaml.CommentedMap()
+        serialized_rule['name'] = ruamel.yaml.scalarstring.SingleQuotedScalarString(rule.name)
+        serialized_rule['pattern'] = ruamel.yaml.scalarstring.SingleQuotedScalarString(rule.pattern)
+        serialized_rule['enabled'] = rule.enabled
+        serialized_rules.append(serialized_rule)
+    config_raw['video']['program_title_regexes'] = serialized_rules
+
+    # 新形式で保存した後は、次回起動時にどちらを優先するか曖昧にならないよう旧キーを除去する
+    if 'program_title_regex' in config_raw['video']:
+        del config_raw['video']['program_title_regex']
     _DumpConfigYAML(yaml, config_raw)
 
     # 保存に成功した後でのみ実行中設定を更新し、ファイルとメモリの値を一致させる
-    ApplyProgramTitleRegex(validated_pattern)
+    ApplyProgramTitleRegexes(program_title_regexes)
 
 
 def SaveConfig(config: ServerSettings) -> None:
@@ -651,7 +732,20 @@ def SaveConfig(config: ServerSettings) -> None:
                 if type(config_raw[key][sub_key]) is ruamel.yaml.CommentedSeq:
                     config_raw[key][sub_key].clear()
                     for item in config_dict[key][sub_key]:
-                        config_raw[key][sub_key].append(ruamel.yaml.scalarstring.SingleQuotedScalarString(item))
+                        # recorded_folders などの文字列リストは従来どおりクォートし、
+                        # program_title_regexes のような辞書リストは YAML マッピングとして保存する
+                        if type(item) is str:
+                            config_raw[key][sub_key].append(ruamel.yaml.scalarstring.SingleQuotedScalarString(item))
+                        elif type(item) is dict:
+                            serialized_item = ruamel.yaml.CommentedMap()
+                            for item_key, item_value in item.items():
+                                if type(item_value) is str:
+                                    serialized_item[item_key] = ruamel.yaml.scalarstring.SingleQuotedScalarString(item_value)
+                                else:
+                                    serialized_item[item_key] = item_value
+                            config_raw[key][sub_key].append(serialized_item)
+                        else:
+                            config_raw[key][sub_key].append(item)
                 else:
                     config_raw[key][sub_key] = ruamel.yaml.CommentedSeq(config_dict[key][sub_key])
             # 文字列は明示的に SingleQuotedScalarString に変換する
@@ -659,6 +753,10 @@ def SaveConfig(config: ServerSettings) -> None:
                 config_raw[key][sub_key] = ruamel.yaml.scalarstring.SingleQuotedScalarString(config_dict[key][sub_key])
             else:
                 config_raw[key][sub_key] = config_dict[key][sub_key]
+
+    # 複数ルール形式を保存した後は、旧キーを残して設定の優先関係を曖昧にしない
+    if 'video' in config_raw and 'program_title_regex' in config_raw['video']:
+        del config_raw['video']['program_title_regex']
 
     _DumpConfigYAML(yaml, config_raw)
 

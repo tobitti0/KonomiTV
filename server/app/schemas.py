@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, RootModel, computed_field, field_validato
 from tortoise.contrib.pydantic import PydanticModel
 from typing_extensions import TypedDict
 
-from app.metadata.ProgramTitleParser import ProgramTitleParser
+from app.metadata.ProgramTitleParser import ProgramTitleParser, ProgramTitleRegexRule
 from app.utils.TSInformation import TerrestrialRegion
 
 
@@ -326,25 +326,26 @@ class SeriesBroadcastPeriod(PydanticModel):
 
 # ***** サーバー設定 *****
 
-class ProgramTitleRegexPatternRequest(BaseModel):
-    pattern: Annotated[str, Field(min_length=1, max_length=10000)]
+class ProgramTitleRegexRulesRequest(BaseModel):
+    rules: Annotated[list[ProgramTitleRegexRule], Field(min_length=1, max_length=50)]
 
-    @field_validator('pattern')
+    @field_validator('rules')
     @classmethod
-    def validate_pattern(cls, pattern: str) -> str:
+    def validate_rules(cls, rules: list[ProgramTitleRegexRule]) -> list[ProgramTitleRegexRule]:
         """
-        番組タイトル解析用正規表現を検証する。
+        番組タイトル解析用正規表現ルール一覧を検証する。
 
         Args:
-            pattern (str): 検証対象の正規表現。
+            rules (list[ProgramTitleRegexRule]): 検証対象の正規表現ルール一覧。
 
         Returns:
-            str: 検証済みの正規表現。
+            list[ProgramTitleRegexRule]: 検証済みの正規表現ルール一覧。
         """
 
-        return ProgramTitleParser.validatePattern(pattern)
+        ProgramTitleParser.validateRules(rules)
+        return rules
 
-class ProgramTitleRegexTestRequest(ProgramTitleRegexPatternRequest):
+class ProgramTitleRegexTestRequest(ProgramTitleRegexRulesRequest):
     titles: Annotated[
         list[Annotated[str, Field(min_length=1, max_length=1000)]],
         Field(min_length=1, max_length=100),
@@ -353,6 +354,8 @@ class ProgramTitleRegexTestRequest(ProgramTitleRegexPatternRequest):
 class ProgramTitleRegexTestResult(BaseModel):
     title: str
     matched: bool
+    matched_rule_index: int | None
+    matched_rule_name: str | None
     series_title: str | None
     episode_number: str | None
     subtitle: str | None
@@ -360,7 +363,7 @@ class ProgramTitleRegexTestResult(BaseModel):
 class ProgramTitleRegexTestResponse(BaseModel):
     results: list[ProgramTitleRegexTestResult]
 
-class ProgramTitleReclassificationRequest(ProgramTitleRegexPatternRequest):
+class ProgramTitleReclassificationRequest(ProgramTitleRegexRulesRequest):
     """保存済み録画番組のシリーズ一括再判定リクエスト。"""
 
 class ProgramTitleReclassificationResult(BaseModel):

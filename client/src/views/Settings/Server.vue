@@ -259,22 +259,56 @@
                 </v-btn>
             </div>
             <div class="settings__item">
-                <div class="settings__item-heading">番組タイトルのシリーズ判定用正規表現</div>
+                <div class="settings__item-heading">番組タイトルのシリーズ判定用正規表現ルール</div>
                 <div class="settings__item-label">
                     録画番組のタイトルからシリーズ名・話数・サブタイトルを抽出し、同じシリーズの録画をまとめるために利用します。<br>
                     [字]・[解]・[新]・[終] などの既知の ARIB 番組付属情報は、元の番組タイトルを変更せず、判定前に自動で除去されます。<br>
-                    大文字・小文字を区別せず、第1キャプチャをシリーズ名、第2キャプチャを話数、第3キャプチャをサブタイトルとして扱います。<br>
+                    ルールは上から順に評価され、最初に一致したルールを採用します。大文字・小文字を区別せず、第1キャプチャをシリーズ名、第2キャプチャを話数、第3キャプチャをサブタイトルとして扱います。<br>
                 </div>
                 <div class="settings__item-label mt-1">
-                    保存した正規表現はサーバーを再起動せず、今後新しく解析される録画から適用されます。既存の録画には、下の「シリーズを再判定」から反映できます。<br>
+                    保存したルールはサーバーを再起動せず、今後新しく解析される録画から適用されます。既存の録画には、下の「シリーズを再判定」から反映できます。<br>
                 </div>
-                <v-textarea class="settings__item-form" color="primary" variant="outlined" hide-details auto-grow
-                    rows="5" max-rows="12" style="font-family: monospace;"
-                    :density="is_form_dense ? 'compact' : 'default'"
-                    v-model="server_settings.video.program_title_regex">
-                </v-textarea>
+                <div v-for="(rule, index) in server_settings.video.program_title_regexes"
+                    :key="'program-title-regex-rule-' + index" class="mt-4 pa-3 rounded"
+                    style="border: 1px solid rgb(var(--v-theme-background-lighten-2));">
+                    <div class="d-flex align-center ga-2">
+                        <v-text-field class="settings__item-form mt-0" color="primary" variant="outlined" hide-details
+                            label="ルール名" :density="is_form_dense ? 'compact' : 'default'" v-model="rule.name">
+                        </v-text-field>
+                        <v-switch v-model="rule.enabled" color="primary" label="有効" hide-details inset></v-switch>
+                    </div>
+                    <v-textarea class="settings__item-form mt-3" color="primary" variant="outlined" hide-details auto-grow
+                        rows="4" max-rows="12" style="font-family: monospace;" label="正規表現"
+                        :density="is_form_dense ? 'compact' : 'default'" v-model="rule.pattern">
+                    </v-textarea>
+                    <div class="d-flex align-center ga-2 mt-3">
+                        <v-btn color="background-lighten-2" variant="flat" size="small" :disabled="index === 0"
+                            @click="moveProgramTitleRegexRule(index, -1)">
+                            <Icon icon="fluent:arrow-up-16-filled" height="17px" />
+                            <span class="ml-1">上へ</span>
+                        </v-btn>
+                        <v-btn color="background-lighten-2" variant="flat" size="small"
+                            :disabled="index === server_settings.video.program_title_regexes.length - 1"
+                            @click="moveProgramTitleRegexRule(index, 1)">
+                            <Icon icon="fluent:arrow-down-16-filled" height="17px" />
+                            <span class="ml-1">下へ</span>
+                        </v-btn>
+                        <v-spacer></v-spacer>
+                        <v-btn color="error" variant="text" size="small"
+                            :disabled="server_settings.video.program_title_regexes.length === 1"
+                            @click="server_settings.video.program_title_regexes.splice(index, 1)">
+                            <Icon icon="fluent:delete-16-filled" height="17px" />
+                            <span class="ml-1">削除</span>
+                        </v-btn>
+                    </div>
+                </div>
+                <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
+                    @click="addProgramTitleRegexRule()">
+                    <Icon icon="fluent:add-12-filled" height="17px" />
+                    <span class="ml-1">ルールを追加</span>
+                </v-btn>
                 <div class="settings__item-label mt-4">
-                    下欄へ1行につき1件の番組タイトルを入力すると、現在編集中の正規表現を保存せずにテストできます（最大100件）。<br>
+                    下欄へ1行につき1件の番組タイトルを入力すると、現在編集中の有効なルールを保存せずに、優先順位どおりテストできます（最大100件）。<br>
                 </div>
                 <v-textarea class="settings__item-form mt-2" color="primary" variant="outlined" hide-details auto-grow
                     rows="4" max-rows="10" placeholder="例: アリス・ギア・アイギス Expansion #01「さらば成子坂製作所!」"
@@ -283,7 +317,7 @@
                 </v-textarea>
                 <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
                     :loading="is_program_title_regex_testing"
-                    :disabled="program_title_regex_test_titles.trim() === ''"
+                    :disabled="program_title_regex_test_titles.trim() === '' || areProgramTitleRegexRulesInvalid"
                     @click="testProgramTitleRegex()">
                     <Icon icon="fluent:checkmark-circle-16-filled" height="18px" />
                     <span class="ml-1">正規表現をテスト</span>
@@ -292,6 +326,7 @@
                     <thead>
                         <tr>
                             <th>判定</th>
+                            <th>一致ルール</th>
                             <th>番組タイトル</th>
                             <th>シリーズ名</th>
                             <th>話数</th>
@@ -305,6 +340,7 @@
                                     {{ result.matched ? '一致' : '不一致' }}
                                 </v-chip>
                             </td>
+                            <td>{{ result.matched_rule_name ?? '—' }}</td>
                             <td>{{ result.title }}</td>
                             <td>{{ result.series_title ?? '—' }}</td>
                             <td>{{ result.episode_number ?? '—' }}</td>
@@ -313,12 +349,12 @@
                     </tbody>
                 </v-table>
                 <div class="settings__item-label mt-5">
-                    現在編集中の正規表現を保存して今後の解析へ即時反映し、DB に保存済みの全録画番組のシリーズ名・話数・サブタイトルとシリーズへの紐付けを一括更新します。<br>
+                    現在編集中のルールを保存して今後の解析へ即時反映し、DB に保存済みの全録画番組のシリーズ名・話数・サブタイトルとシリーズへの紐付けを一括更新します。<br>
                     録画ファイル自体は再解析しないため、CM 区間情報・サムネイル・動画メタデータは変更されません。<br>
                 </div>
                 <v-btn class="mt-3" color="primary" variant="flat" height="40px"
                     :loading="is_program_title_reclassifying"
-                    :disabled="server_settings.video.program_title_regex.trim() === '' ||
+                    :disabled="areProgramTitleRegexRulesInvalid ||
                         is_program_title_regex_testing || is_program_title_reclassifying"
                     @click="reclassifyProgramTitles()">
                     <Icon icon="fluent:arrow-sync-16-filled" height="18px" />
@@ -539,6 +575,7 @@ import ServerLogDialog from '@/components/Settings/ServerLogDialog.vue';
 import Message from '@/message';
 import Maintenance, { type CMAnalysisTarget, type ICMAnalysisJob } from '@/services/Maintenance';
 import Settings, {
+    IProgramTitleRegexRule,
     IProgramTitleRegexTestResult,
     IServerSettings,
     IServerSettingsDefault,
@@ -662,6 +699,33 @@ const program_title_regex_test_titles = ref([
 const program_title_regex_test_results = ref<IProgramTitleRegexTestResult[] | null>(null);
 const is_program_title_regex_testing = ref(false);
 const is_program_title_reclassifying = ref(false);
+const areProgramTitleRegexRulesInvalid = computed(() => {
+    const rules = server_settings.value.video.program_title_regexes;
+    return rules.length === 0 ||
+        rules.some(rule => rule.name.trim() === '' || rule.pattern.trim() === '') ||
+        rules.every(rule => rule.enabled === false);
+});
+
+// 新しいルールを末尾へ追加する
+function addProgramTitleRegexRule() {
+    const newRule: IProgramTitleRegexRule = {
+        name: `追加ルール ${server_settings.value.video.program_title_regexes.length + 1}`,
+        pattern: '',
+        enabled: true,
+    };
+    server_settings.value.video.program_title_regexes.push(newRule);
+}
+
+// ルールを上下へ移動し、配列の並び順として保持している優先順位を変更する
+function moveProgramTitleRegexRule(index: number, direction: -1 | 1) {
+    const destinationIndex = index + direction;
+    const rules = server_settings.value.video.program_title_regexes;
+    if (destinationIndex < 0 || destinationIndex >= rules.length) {
+        return;
+    }
+    const [rule] = rules.splice(index, 1);
+    rules.splice(destinationIndex, 0, rule);
+}
 
 // 現在編集中の正規表現を、入力された各番組タイトルに対してテストする
 async function testProgramTitleRegex() {
@@ -682,7 +746,7 @@ async function testProgramTitleRegex() {
     is_program_title_regex_testing.value = true;
     try {
         program_title_regex_test_results.value = await Settings.testProgramTitleRegex(
-            server_settings.value.video.program_title_regex,
+            server_settings.value.video.program_title_regexes,
             titles,
         );
     } finally {
@@ -698,7 +762,7 @@ async function reclassifyProgramTitles() {
         '録画件数が多い環境では、完了まで時間がかかることがあります。'
     );
     try {
-        const result = await Settings.reclassifyProgramTitles(server_settings.value.video.program_title_regex);
+        const result = await Settings.reclassifyProgramTitles(server_settings.value.video.program_title_regexes);
         if (result !== null) {
             Message.success(
                 '正規表現の保存と、保存済み録画番組のシリーズ再判定が完了しました。\n' +
@@ -714,6 +778,11 @@ async function reclassifyProgramTitles() {
 // サーバー設定を更新する関数
 async function updateServerSettings() {
 
+    if (areProgramTitleRegexRulesInvalid.value) {
+        Message.error('正規表現ルールの名前と正規表現を入力し、1件以上を有効にしてください。');
+        return;
+    }
+
     // custom_https_certificate と custom_https_private_key が空文字列の場合は null に変換
     if (server_settings.value.server.custom_https_certificate === '') {
         server_settings.value.server.custom_https_certificate = null;
@@ -727,11 +796,11 @@ async function updateServerSettings() {
 
     // 成功した場合のみメッセージを表示
     // エラー処理は Services 層で行われるため、ここではエラー処理は不要
-    // シリーズ判定用正規表現だけは即時反映され、それ以外の設定は再起動後に反映される
+    // シリーズ判定用正規表現ルールだけは即時反映され、それ以外の設定は再起動後に反映される
     if (result === true) {
         Message.success(
             'サーバー設定を更新しました。\n' +
-            'シリーズ判定用正規表現はすぐに反映されます。その他の変更を反映するには、KonomiTV サーバーを再起動してください。'
+            'シリーズ判定用正規表現ルールはすぐに反映されます。その他の変更を反映するには、KonomiTV サーバーを再起動してください。'
         );
     }
 }
