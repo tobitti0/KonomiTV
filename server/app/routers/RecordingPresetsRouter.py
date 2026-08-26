@@ -102,17 +102,25 @@ def ParseRecordingFolders(
         if folder_path == '':
             continue
 
-        # RecNamePlugIn から ? 以降のファイル名テンプレート部分を抽出
+        # WritePlugIn は OS や EDCB の構成によって拡張子・実装が異なるため、設定値をそのまま保持する
+        write_plugin = section.get(f'WritePlugIn{i}', '')
+
+        # RecNamePlugIn からプラグイン名と ? 以降のファイル名テンプレート部分を抽出
         ## RecName_Macro.dll?$title$.ts のような形式で格納されている
         rec_name_plug_in = section.get(f'RecNamePlugIn{i}', '')
+        recording_file_name_plugin: str | None = None
         recording_file_name_template: str | None = None
-        if '?' in rec_name_plug_in:
-            template = rec_name_plug_in.split('?', 1)[1]
-            if template != '':
+        if rec_name_plug_in != '':
+            plugin, separator, template = rec_name_plug_in.partition('?')
+            if plugin != '':
+                recording_file_name_plugin = plugin
+            if separator != '' and template != '':
                 recording_file_name_template = template
 
         folders.append(schemas.RecordingFolder(
             recording_folder_path = folder_path,
+            write_plugin = write_plugin,
+            recording_file_name_plugin = recording_file_name_plugin,
             recording_file_name_template = recording_file_name_template,
             is_oneseg_separate_recording_folder = is_oneseg,
         ))

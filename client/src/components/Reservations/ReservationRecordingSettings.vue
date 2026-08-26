@@ -298,8 +298,16 @@ const updateRecordingFolderSettings = (folderPath: string, fileNameTemplate: str
     } else {
         // どちらか一方でも指定されている場合は新しい要素を追加
         if (settings.value.recording_folders.length === 0) {
+            // 新しい録画フォルダにも EDCB のデフォルトプロファイルと同じプラグインを引き継ぐ
+            const defaultRecordingFolder = initialSettings.value.recording_folders
+                .find(recordingFolder => recordingFolder.is_oneseg_separate_recording_folder === false) ??
+                props.presets?.presets
+                    .find(preset => preset.id === 0)?.record_settings.recording_folders
+                    .find(recordingFolder => recordingFolder.is_oneseg_separate_recording_folder === false);
             settings.value.recording_folders.push({
                 recording_folder_path: '',
+                write_plugin: defaultRecordingFolder?.write_plugin ?? 'Write_Default.dll',
+                recording_file_name_plugin: defaultRecordingFolder?.recording_file_name_plugin ?? 'RecName_Macro.dll',
                 recording_file_name_template: null,
                 is_oneseg_separate_recording_folder: false,
             });

@@ -314,6 +314,9 @@ export default defineComponent({
             this.is_starting_recording = true;
             try {
                 const defaultSettings = await Reservations.fetchDefaultRecordSettings();
+                if (defaultSettings === null) {
+                    return;
+                }
                 const result = await Reservations.addReservation(
                     programPresent.id,
                     defaultSettings,

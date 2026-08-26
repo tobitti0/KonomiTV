@@ -402,12 +402,14 @@ def DecodeEDCBRecSettingData(rec_settings_data: RecSettingDataRequired) -> schem
     recording_folders: list[schemas.RecordingFolder] = []
     for key in ('rec_folder_list', 'partial_rec_folder'):
         for rec_folder in rec_settings_data[key]:
-            # rec_name_plug_in は ? 以降が録画ファイル名テンプレート (マクロ) の値になっているので抽出
+            # rec_name_plug_in からプラグイン名と ? 以降の録画ファイル名テンプレート (マクロ) を抽出
             ## RecName_Macro.dll?$title$.ts のような形式で返ってくる
-            recording_file_name_template = rec_folder['rec_name_plug_in'].split('?', 1)[1] if '?' in rec_folder['rec_name_plug_in'] else ''
+            recording_file_name_plugin_raw, separator, recording_file_name_template_raw = rec_folder['rec_name_plug_in'].partition('?')
             recording_folders.append(schemas.RecordingFolder(
                 recording_folder_path = rec_folder['rec_folder'],
-                recording_file_name_template = recording_file_name_template if recording_file_name_template != '' else None,
+                write_plugin = rec_folder['write_plug_in'],
+                recording_file_name_plugin = recording_file_name_plugin_raw if recording_file_name_plugin_raw != '' else None,
+                recording_file_name_template = recording_file_name_template_raw if separator != '' and recording_file_name_template_raw != '' else None,
                 is_oneseg_separate_recording_folder = key == 'partial_rec_folder',
             ))
 
@@ -585,16 +587,12 @@ def EncodeEDCBRecSettingData(record_settings: schemas.RecordSettings) -> RecSett
     rec_folder_list: list[RecFileSetInfoRequired] = []
     partial_rec_folder: list[RecFileSetInfoRequired] = []
     for recording_folder in record_settings.recording_folders:
-        # TS 書き込みプラグインは基本 Write_Default.dll しかないので固定
-        ## 一応 Write_OneService.dll や Write_Multi とかがなくもないが、利用用途があるのかすら知らないため無視
-        write_plug_in = 'Write_Default.dll'
-        # 録画ファイル名変更プラグインは RecName_Macro.dll しかないので固定
-        ## 空文字列にすると EpgTimerSrv 設定の「録画時のファイル名に PlugIn を使用する」が有効かどうか次第になるが、
-        ## わざわざ無効にするユースケースがほとんどないため、KonomiTV では EpgTimerSrv での設定値に関わらず常に有効化する
-        rec_name_plug_in = 'RecName_Macro.dll'
-        # ファイル名テンプレートが指定されている場合は ? 以降に RecName_Macro.dll へのオプションとして追加する
-        if recording_folder.recording_file_name_template is not None:
-            rec_name_plug_in = f'RecName_Macro.dll?{recording_folder.recording_file_name_template}'
+        # OS や EDCB の構成によって実装・拡張子が異なるため、API で受け取ったプラグイン名をそのまま使用する
+        write_plug_in = recording_folder.write_plugin
+        rec_name_plug_in = recording_folder.recording_file_name_plugin or ''
+        # ファイル名テンプレートが指定されている場合は ? 以降にプラグインへのオプションとして追加する
+        if rec_name_plug_in != '' and recording_folder.recording_file_name_template is not None:
+            rec_name_plug_in = f'{rec_name_plug_in}?{recording_folder.recording_file_name_template}'
         # ワンセグ録画フォルダかどうかで分ける
         if recording_folder.is_oneseg_separate_recording_folder is False:
             rec_folder_list.append({

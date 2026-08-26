@@ -88,7 +88,7 @@
                 </v-btn>
                 <!-- mock の予約 (予約なし) の場合: 予約追加ボタン -->
                 <v-btn v-if="showAddButton" class="px-3" color="secondary" variant="flat"
-                    :disabled="!isEDCBBackend" :loading="isAdding" @click="handleAddReservation">
+                    :disabled="!isEDCBBackend || !isReservationAddingEnabled" :loading="isAdding" @click="handleAddReservation">
                     <Icon icon="fluent:timer-16-regular" width="20px" height="20px" />
                     <span class="ml-1">予約を追加</span>
                 </v-btn>
@@ -197,7 +197,7 @@ import useServerSettingsStore from '@/stores/ServerSettingsStore';
 import { ProgramUtils } from '@/utils';
 
 // Props
-const props = defineProps<{
+const props = withDefaults(defineProps<{
     // 予約情報（予約がある場合に使用）
     reservation: IReservation | null;
     // 番組情報（予約がない場合に使用、番組表からの呼び出し用）
@@ -206,9 +206,13 @@ const props = defineProps<{
     channel?: IChannel | null;
     // 過去番組かどうか（true の場合、予約関連 UI は非表示）
     isPastProgram?: boolean;
+    // EDCB のデフォルト録画設定を取得できており、新規予約を追加できるかどうか
+    isReservationAddingEnabled?: boolean;
     // ドロワーの表示状態
     modelValue: boolean;
-}>();
+}>(), {
+    isReservationAddingEnabled: true,
+});
 
 // Emits
 const emit = defineEmits<{
@@ -402,6 +406,12 @@ const confirmDelete = async () => {
 // mock の予約に含まれる record_settings (ユーザーがカスタマイズ可能) を使用して追加
 const handleAddReservation = async () => {
     if (isAdding.value || !displayProgram.value || !props.reservation) return;
+
+    // EDCB のデフォルトプロファイルを取得できていない場合は、不完全な設定で予約しない
+    if (props.isReservationAddingEnabled === false) {
+        Message.error('EDCB のデフォルト録画設定を取得できないため、録画予約を追加できません。');
+        return;
+    }
 
     // EDCB バックエンドでない場合はエラー
     if (!isEDCBBackend.value) {
