@@ -283,10 +283,13 @@ db_check=$(docker run --rm --network none --read-only --tmpfs /tmp \
 test "$db_check" = ok
 ```
 
-本番 checkout の `origin` は pull 専用の HTTPS URL にしておくと、SSH host key や秘密鍵の状態に依存しません。取得後は必ず fast-forward のみで更新し、実際の旧 SHA から migration・設定・Compose 定義の差分を確認します。
+本番 checkout の `origin` は pull 専用の HTTPS URL にしておくと、通常は SSH host key や秘密鍵の状態に依存しません。ただし、グローバルな `url.*.insteadOf` 設定により HTTPS URL が SSH URL へ書き換えられる場合があります。設定上の URL と Git が実際に使う URL を両方確認します。
 
 ```bash
 git -C "$checkout_path" remote set-url origin https://github.com/tobitti0/KonomiTV.git
+git -C "$checkout_path" config --get remote.origin.url
+git -C "$checkout_path" remote get-url origin
+git config --show-origin --get-regexp '^url\..*\.insteadOf$' || true
 git -C "$checkout_path" fetch --prune origin
 git -C "$checkout_path" merge --ff-only origin/dev-tobitti
 new_git_sha=$(git -C "$checkout_path" rev-parse HEAD)
@@ -294,6 +297,10 @@ new_git_sha=$(git -C "$checkout_path" rev-parse HEAD)
 git -C "$checkout_path" diff --name-status "$old_git_sha..$new_git_sha" -- \
     server/app/migrations config.example.yaml docker-compose.example.yaml Dockerfile
 ```
+
+SSH に書き換えられていて host key 検証に失敗した場合は、`StrictHostKeyChecking=no` で回避しません。GitHub 公式の [SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) と照合し、古い host または解決先 IP のエントリーだけを `ssh-keygen -R <host-or-ip>` で削除してから再接続します。`known_hosts` 全体を消してはいけません。
+
+取得後は必ず fast-forward のみで更新し、実際の旧 SHA から migration・設定・Compose 定義の差分を確認します。
 
 旧 container を稼働させたまま `konomitv` image だけを build します。切替前に新 image の ID、NVEncC のバージョン、コードが要求するオプションを確認します。本流の `build_thirdparty.yaml` が指定する HWEncC バージョンと Dockerfile の固定値も、同期のたびに照合します。
 
@@ -304,9 +311,15 @@ test "$new_image_id" != "$old_image_id"
 docker image tag "$new_image_id" "tvsystems-konomitv:$new_git_sha"
 
 docker run --rm --gpus all \
+    -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     --entrypoint /code/server/thirdparty/NVEncC/NVEncC.elf \
     "$new_image_id" --version
 docker run --rm --gpus all \
+    -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    --entrypoint /code/server/thirdparty/NVEncC/NVEncC.elf \
+    "$new_image_id" --check-hw
+docker run --rm --gpus all \
+    -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     --entrypoint /code/server/thirdparty/NVEncC/NVEncC.elf \
     "$new_image_id" --help 2>&1 | grep -- '--adapt-resolution'
 ```
@@ -328,6 +341,8 @@ docker compose -f "$compose_path" logs --tail=250 konomitv
 docker inspect --format '{{.RestartCount}}' "$new_container_id"
 ```
 
+最後に、チャンネル一覧・録画一覧・録画ファイルの Range 応答を確認します。空きチューナーがあり録画や視聴を妨げない場合だけ、短時間のライブ配信も開始し、`Standby` → `ONAir` → `Idling` → `Offline` と遷移すること、ログ上の NVEncC コマンドに `--adapt-resolution` が含まれることを確認します。テスト接続を切断した後に `Idling` やクライアントが残った状態で完了扱いにしてはいけません。
+
 異常がある場合は、DB migration の有無を確認したうえで旧 image へ戻します。migration がない更新では、通常 DB の復元は不要です。
 
 ```bash
@@ -347,3 +362,7 @@ DB 自体を戻す必要がある場合だけ、KonomiTV container を停止し�
 - 本流 `5cbbd348` を `dev-tobitti` へ統合したマージコミット: `42615681`
 - `box-history-import` と `recording-default-profile` は統合対象外として維持
 - 本流コードが要求する `--adapt-resolution` に合わせ、Docker image 内の QSVEncC / NVEncC / VCEEncC を 8.26 / 9.31 / 9.12 へ固定更新
+- 本番 checkout を `33bc6f2c` から `db0e1254` へ fast-forward し、KonomiTV container だけを再作成
+- 本番 image: `sha256:6cabb787f45c18159fcaaeda6906d8898f59532515fc4bfa78039337403fa0b0`
+- バックアップ: `/home/tobitti/Dockers/TVSystems/KonomiTV-deploy-backups/20260827-131354.ILATQ1`
+- NVEncC 9.31 / GTX 1050 Ti の H.264・H.265 対応、録画 Range 応答、`gr011-720p` の実配信と切断後 cleanup を確認
