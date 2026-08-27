@@ -225,6 +225,120 @@ Git の同期・統合完了は、実環境へのデプロイ許可や動作確�
 - PWA更新、オフライン保存・再生、CMチャプター、シリーズ次話再生を確認する
 - ユーザー管理の KonomiTV・PM2・Docker プロセスを、明示的な許可なく再起動しない
 
+### 本番 Docker 環境の更新手順
+
+本番環境では次の配置を前提とします。
+
+- checkout: `/home/tobitti/Dockers/TVSystems/KonomiTV`
+- Compose file: `/home/tobitti/Dockers/TVSystems/docker-compose.yml`
+- Compose project / service: `tvsystems` / `konomitv`
+- container: `tvsystem.konomitv`
+- image: `tvsystems-konomitv:latest`
+
+ソースコードは bind mount ではなく image にコピーされます。したがって、`git pull` 後の `docker compose restart konomitv` だけでは更新されません。新 image を build し、`konomitv` だけを `--no-deps --force-recreate` で再作成します。`mirakurun`、`edcb`、`mysql`、`epgstation`、`nginx`、`tvdashboard`、`cloudflared` は再作成しません。
+
+まず checkout、Compose の解決結果、稼働中の container と image を確認します。`server/data` 配下には正規の未追跡ランタイムデータがあるため、tracked file の差分だけを確認します。
+
+```bash
+checkout_path=/home/tobitti/Dockers/TVSystems/KonomiTV
+compose_path=/home/tobitti/Dockers/TVSystems/docker-compose.yml
+
+test "$(git -C "$checkout_path" branch --show-current)" = dev-tobitti
+git -C "$checkout_path" diff --quiet
+git -C "$checkout_path" diff --cached --quiet
+docker compose -f "$compose_path" config --quiet
+docker compose -f "$compose_path" ps konomitv
+```
+
+切替前に、旧 Git SHA、旧 image、設定、Compose 定義、SQLite DB を退避します。DB は稼働中の旧 image に含まれる Python の SQLite backup API を使い、WAL の内容を含む一貫したコピーを作成します。バックアップ先は checkout の外に置き、権限を `0700` にします。
+
+```bash
+deploy_stamp=$(date +%Y%m%d-%H%M%S)
+backup_dir="/home/tobitti/Dockers/TVSystems/KonomiTV-deploy-backups/$deploy_stamp"
+old_git_sha=$(git -C "$checkout_path" rev-parse HEAD)
+old_container_id=$(docker compose -f "$compose_path" ps -q konomitv)
+old_image_id=$(docker inspect --format '{{.Image}}' "$old_container_id")
+rollback_tag="tvsystems-konomitv:rollback-$deploy_stamp-$old_git_sha"
+
+install -d -m 0700 "$backup_dir"
+docker image tag "$old_image_id" "$rollback_tag"
+printf '%s\n' "$old_git_sha" > "$backup_dir/old-git-sha.txt"
+printf '%s\n' "$old_image_id" > "$backup_dir/old-image-id.txt"
+printf '%s\n' "$rollback_tag" > "$backup_dir/rollback-tag.txt"
+cp -a "$checkout_path/config.yaml" "$compose_path" "$backup_dir/"
+
+docker run --rm --network none --read-only --tmpfs /tmp \
+    --entrypoint /code/server/.venv/bin/python \
+    -e PYTHONDONTWRITEBYTECODE=1 \
+    -v "$checkout_path/server/data:/source:ro" \
+    -v "$backup_dir:/backup" \
+    "$old_image_id" \
+    -c "import sqlite3; s=sqlite3.connect('file:/source/database.sqlite?mode=ro', uri=True); d=sqlite3.connect('/backup/database.sqlite'); s.backup(d); d.close(); s.close()"
+
+db_check=$(docker run --rm --network none --read-only --tmpfs /tmp \
+    --entrypoint /code/server/.venv/bin/python \
+    -v "$backup_dir:/backup:ro" \
+    "$old_image_id" \
+    -c "import sqlite3; c=sqlite3.connect('file:/backup/database.sqlite?mode=ro&immutable=1', uri=True); print(c.execute('PRAGMA quick_check').fetchone()[0]); c.close()")
+test "$db_check" = ok
+```
+
+本番 checkout の `origin` は pull 専用の HTTPS URL にしておくと、SSH host key や秘密鍵の状態に依存しません。取得後は必ず fast-forward のみで更新し、実際の旧 SHA から migration・設定・Compose 定義の差分を確認します。
+
+```bash
+git -C "$checkout_path" remote set-url origin https://github.com/tobitti0/KonomiTV.git
+git -C "$checkout_path" fetch --prune origin
+git -C "$checkout_path" merge --ff-only origin/dev-tobitti
+new_git_sha=$(git -C "$checkout_path" rev-parse HEAD)
+
+git -C "$checkout_path" diff --name-status "$old_git_sha..$new_git_sha" -- \
+    server/app/migrations config.example.yaml docker-compose.example.yaml Dockerfile
+```
+
+旧 container を稼働させたまま `konomitv` image だけを build します。切替前に新 image の ID、NVEncC のバージョン、コードが要求するオプションを確認します。本流の `build_thirdparty.yaml` が指定する HWEncC バージョンと Dockerfile の固定値も、同期のたびに照合します。
+
+```bash
+docker compose -f "$compose_path" build konomitv
+new_image_id=$(docker image inspect --format '{{.Id}}' tvsystems-konomitv:latest)
+test "$new_image_id" != "$old_image_id"
+docker image tag "$new_image_id" "tvsystems-konomitv:$new_git_sha"
+
+docker run --rm --gpus all \
+    --entrypoint /code/server/thirdparty/NVEncC/NVEncC.elf \
+    "$new_image_id" --version
+docker run --rm --gpus all \
+    --entrypoint /code/server/thirdparty/NVEncC/NVEncC.elf \
+    "$new_image_id" --help 2>&1 | grep -- '--adapt-resolution'
+```
+
+ライブ視聴中のセッションがないことを再確認してから切り替えます。`--no-build` により、直前に検証した image だけを使います。
+
+```bash
+curl -fsS http://127.0.0.1:7000/api/streams/live
+docker compose -f "$compose_path" up -d --no-deps --force-recreate --no-build konomitv
+```
+
+切替後は container が新 image ID を使っていること、API が応答すること、再起動ループや startup error がないことを確認します。Compose に healthcheck はないため、`up -d` の成功だけで完了扱いにしません。
+
+```bash
+new_container_id=$(docker compose -f "$compose_path" ps -q konomitv)
+test "$(docker inspect --format '{{.Image}}' "$new_container_id")" = "$new_image_id"
+curl -fsS http://127.0.0.1:7000/api/version
+docker compose -f "$compose_path" logs --tail=250 konomitv
+docker inspect --format '{{.RestartCount}}' "$new_container_id"
+```
+
+異常がある場合は、DB migration の有無を確認したうえで旧 image へ戻します。migration がない更新では、通常 DB の復元は不要です。
+
+```bash
+docker image tag "$rollback_tag" tvsystems-konomitv:latest
+docker compose -f "$compose_path" up -d --no-deps --force-recreate --no-build konomitv
+rollback_container_id=$(docker compose -f "$compose_path" ps -q konomitv)
+test "$(docker inspect --format '{{.Image}}' "$rollback_container_id")" = "$old_image_id"
+```
+
+DB 自体を戻す必要がある場合だけ、KonomiTV container を停止して現行の DB・WAL・SHM を別名で退避してから、検証済みの `database.sqlite` を復元します。稼働中の DB ファイルを直接上書きしてはいけません。
+
 ## 運用記録
 
 ### 2026-08-27
@@ -232,3 +346,4 @@ Git の同期・統合完了は、実環境へのデプロイ許可や動作確�
 - `origin/master` を `ba7a6f04` から本流 `5cbbd348` へ fast-forward
 - 本流 `5cbbd348` を `dev-tobitti` へ統合したマージコミット: `42615681`
 - `box-history-import` と `recording-default-profile` は統合対象外として維持
+- 本流コードが要求する `--adapt-resolution` に合わせ、Docker image 内の QSVEncC / NVEncC / VCEEncC を 8.26 / 9.31 / 9.12 へ固定更新

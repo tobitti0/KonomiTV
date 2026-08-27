@@ -17,5 +17,9 @@ server/.venv/
 # データベース: マイグレーションに失敗するのを防ぐ
 server/data/*
 
+# 実行時ログ: bind mount するため Docker イメージには含めない
+server/logs/*
+!server/logs/.gitkeep
+
 # サードパーティーライブラリ: Docker 側でファイルを準備するため不要
 server/thirdparty/

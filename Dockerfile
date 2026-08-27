@@ -86,18 +86,48 @@ FROM ubuntu:22.04 AS thirdparty-downloader
 # apt-get に対話的に設定確認されないための設定
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ダウンロード・展開に必要なパッケージのインストール
-RUN apt-get update && apt-get install -y --no-install-recommends aria2 ca-certificates unzip xz-utils
+# ダウンロード・展開と HWEncC バイナリの調整に必要なパッケージのインストール
+RUN apt-get update && apt-get install -y --no-install-recommends aria2 ca-certificates curl patchelf perl-base xz-utils
 
 # サードパーティーライブラリをダウンロード
 ## サードパーティーライブラリは変更が少ないので、先にダウンロード処理を実行してビルドキャッシュを効かせる
 WORKDIR /
 ## リリース版用
-RUN aria2c -x10 https://github.com/tsukumijima/KonomiTV/releases/download/v0.14.1/thirdparty-linux.tar.xz
-RUN tar xvf thirdparty-linux.tar.xz
-## 開発版 (0.xx.x-dev) 用
-# RUN aria2c -x10 https://nightly.link/tsukumijima/KonomiTV/actions/runs/27093421017/thirdparty-linux.tar.xz.zip
-# RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
+ARG KONOMITV_THIRDPARTY_VERSION=v0.14.1
+ARG KONOMITV_THIRDPARTY_SHA256=1aece5f06119790c58655254be2282ddfd80a009de96c2d670cc5e4ea67ac43d
+RUN set -eux; \
+    aria2c -x10 -o thirdparty-linux.tar.xz "https://github.com/tsukumijima/KonomiTV/releases/download/${KONOMITV_THIRDPARTY_VERSION}/thirdparty-linux.tar.xz"; \
+    echo "${KONOMITV_THIRDPARTY_SHA256}  thirdparty-linux.tar.xz" | sha256sum -c -; \
+    tar -xJf thirdparty-linux.tar.xz; \
+    rm thirdparty-linux.tar.xz
+
+# 本流の開発版コードが使用する --adapt-resolution に対応した HWEncC へ更新する
+## GitHub Actions artifact は期限切れ・匿名ダウンロード障害の影響を受けるため、作者の固定 Release を使用する
+## バージョンは .github/workflows/build_thirdparty.yaml の Linux x64 ビルドと合わせる
+ARG QSVENCC_VERSION=8.26
+ARG QSVENCC_SHA256=3b8c9ea9801e6563a8efc62acea2ab86404cf01503d134b6cf013a186f4f1b7a
+ARG NVENCC_VERSION=9.31
+ARG NVENCC_SHA256=ee2b2b84b7450fad2790659410c00f86d4bba8a9931218060169bb97c97a73bc
+ARG VCEENCC_VERSION=9.12
+ARG VCEENCC_SHA256=1ee7837778b877755378d65e642a1a6be08bd03095125ae53242e5c962faf659
+RUN set -eux; \
+    curl -fL --retry 5 --retry-all-errors -o qsvencc.deb "https://github.com/rigaya/QSVEnc/releases/download/${QSVENCC_VERSION}/qsvencc_${QSVENCC_VERSION}_amd64.deb"; \
+    curl -fL --retry 5 --retry-all-errors -o nvencc.deb "https://github.com/rigaya/NVEnc/releases/download/${NVENCC_VERSION}/nvencc_${NVENCC_VERSION}_amd64.deb"; \
+    curl -fL --retry 5 --retry-all-errors -o vceencc.deb "https://github.com/rigaya/VCEEnc/releases/download/${VCEENCC_VERSION}/vceencc_${VCEENCC_VERSION}_amd64.deb"; \
+    echo "${QSVENCC_SHA256}  qsvencc.deb" | sha256sum -c -; \
+    echo "${NVENCC_SHA256}  nvencc.deb" | sha256sum -c -; \
+    echo "${VCEENCC_SHA256}  vceencc.deb" | sha256sum -c -; \
+    dpkg-deb -x qsvencc.deb /tmp/qsvencc; \
+    dpkg-deb -x nvencc.deb /tmp/nvencc; \
+    dpkg-deb -x vceencc.deb /tmp/vceencc; \
+    install -m 0755 /tmp/qsvencc/usr/bin/qsvencc /thirdparty/QSVEncC/QSVEncC.elf; \
+    install -m 0755 /tmp/nvencc/usr/bin/nvencc /thirdparty/NVEncC/NVEncC.elf; \
+    install -m 0755 /tmp/vceencc/usr/bin/vceencc /thirdparty/VCEEncC/VCEEncC.elf; \
+    perl -0pi -e 's#/usr/lib/x86_64-linux-gnu#/bundle/disabled/path/001#g; s#/usr/lib64#/bad/path9#g; s#/usr/lib#/bad/lib#g' /thirdparty/QSVEncC/QSVEncC.elf; \
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/../Library' /thirdparty/QSVEncC/QSVEncC.elf; \
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' /thirdparty/NVEncC/NVEncC.elf; \
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' /thirdparty/VCEEncC/VCEEncC.elf; \
+    rm -rf qsvencc.deb nvencc.deb vceencc.deb /tmp/qsvencc /tmp/nvencc /tmp/vceencc
 
 # --------------------------------------------------------------------------------------------------------------
 # クライアントをビルドするステージ
