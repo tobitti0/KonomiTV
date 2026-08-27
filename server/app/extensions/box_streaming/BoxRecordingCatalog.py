@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+import anyio
 from tortoise import connections
 
 from app import logging, schemas
@@ -221,7 +222,7 @@ class BoxRecordingCatalog:
         ]
 
     @classmethod
-    def decorateRecordedProgram(cls, recorded_program: schemas.RecordedProgram) -> schemas.RecordedProgram:
+    async def decorateRecordedProgram(cls, recorded_program: schemas.RecordedProgram) -> schemas.RecordedProgram:
         """
         API レスポンスへローカル・Box の保存状態を付加する。
 
@@ -233,7 +234,7 @@ class BoxRecordingCatalog:
         """
 
         mapping = cls.get(recorded_program.id)
-        local_exists = pathlib.Path(recorded_program.recorded_video.file_path).is_file()
+        local_exists = await anyio.Path(recorded_program.recorded_video.file_path).is_file()
         if mapping is None:
             recorded_program.recorded_video.storage_type = 'Local'
             recorded_program.recorded_video.box_file_id = None

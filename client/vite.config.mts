@@ -36,6 +36,14 @@ export default defineConfig({
         alias: {'@': fileURLToPath(new URL('./src', import.meta.url))},
         extensions: ['.js', '.json', '.jsx', '.mjs', '.ts', '.tsx', '.vue'],
     },
+    // mpeg2toh264 は配布済みの Worker を import.meta.url から解決するため、依存関係の事前バンドルから除外する
+    // エントリーポイントだけを .vite/deps/ へ移動すると相対 URL の起点が変わり、同梱 Worker を取得できなくなる
+    optimizeDeps: {
+        exclude: [
+            'mpeg2toh264/player',
+            'mpeg2toh264/yadif',
+        ],
+    },
     // SASS / SCSS の設定
     css: {
         preprocessorOptions: {
@@ -77,7 +85,9 @@ export default defineConfig({
         // ref: https://vite-pwa-org.netlify.app/guide/
         VitePWA({
             // Service Worker の登録方法
-            strategies: 'generateSW',
+            strategies: 'injectManifest',
+            srcDir: 'src',
+            filename: 'sw.ts',
             registerType: 'prompt',  // PWA の更新前にユーザーに確認する
             injectRegister: 'auto',
             // PWA のキャッシュに含めるファイル
@@ -118,15 +128,10 @@ export default defineConfig({
                     }
                 ]
             },
-            // Workbox の設定
-            workbox: {
-                // 古いキャッシュを自動削除する
-                cleanupOutdatedCaches: true,
-                // /api/, /cdn-cgi/(cloudflare) 以下のリクエストでは index.html を返さない
-                navigateFallbackDenylist: [/^\/api/, /^\/cdn-cgi/],
-                // キャッシュするファイルの最大サイズ
+            // 独自 Service Worker へ注入する事前キャッシュの設定
+            injectManifest: {
                 maximumFileSizeToCacheInBytes: 1024 * 1024 * 15,  // 15MB
-            }
+            },
         }),
     ],
     // Web Worker 上のプラグインの設定

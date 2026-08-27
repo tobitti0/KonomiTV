@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from app.extensions.box_streaming.BoxClient import (
     BoxAPIError,
@@ -247,6 +248,17 @@ async def CreateBoxFileStreamingResponse(
             f"attachment; filename*=UTF-8''{quote(download_filename, safe='')}"
         )
 
+    is_stream_closed = False
+
+    async def CloseBoxStream() -> None:
+        """Box API のレスポンスストリームを最初の1回だけ閉じる。"""
+        nonlocal is_stream_closed
+        # 応答本文の finally と StreamingResponse の終了処理から重複して呼ばれるため、最初の1回だけ閉じる
+        if is_stream_closed is True:
+            return
+        is_stream_closed = True
+        await stream_context.__aexit__(None, None, None)
+
     async def StreamBoxFile() -> AsyncIterator[bytes]:
         """
         Box API のレスポンスをチャンク単位で転送する。
@@ -259,11 +271,13 @@ async def CreateBoxFileStreamingResponse(
             async for chunk in upstream_response.aiter_bytes(chunk_size=1024 * 1024):
                 yield chunk
         finally:
-            await stream_context.__aexit__(None, None, None)
+            await CloseBoxStream()
 
     return StreamingResponse(
         StreamBoxFile(),
         status_code = upstream_response.status_code,
         headers = response_headers,
         media_type = 'video/mp2t',
+        # クライアントが応答開始直後に切断し、ジェネレーター本体が一度も実行されない場合も必ず閉じる
+        background = BackgroundTask(CloseBoxStream),
     )

@@ -215,7 +215,7 @@ async def BuildSeriesSchemas(db_series_list: list[Series]) -> list[schemas.Serie
         recorded_program_data['channel'] = channel_by_broadcast_period_id[db_recorded_program.series_broadcast_period_id]
         recorded_program_schema = schemas.RecordedProgram.model_validate(recorded_program_data)
         recorded_programs_by_broadcast_period_id[db_recorded_program.series_broadcast_period_id].append(
-            BoxRecordingCatalog.decorateRecordedProgram(recorded_program_schema)
+            await BoxRecordingCatalog.decorateRecordedProgram(recorded_program_schema)
         )
 
     broadcast_periods_by_series_id: dict[int, list[schemas.SeriesBroadcastPeriod]] = {
