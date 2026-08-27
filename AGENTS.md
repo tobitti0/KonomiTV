@@ -2,6 +2,7 @@
 
 ## プロジェクト固有の注意事項
 
+- フォークの `master`・`dev-tobitti`・`integrate/*`・`future/*` の運用と本流追従は、[FORK_MAINTENANCE.md](FORK_MAINTENANCE.md) に従ってください。`origin/master` は `upstream/master` の完全なミラーとして保ち、フォーク固有の変更を入れてはいけません。
 - yarn や poetry はそれぞれ `client/` と `server/` のディレクトリに移動した状態で実行してください。ルートディレクトリにはパッケージ管理系のファイルは一切配置していません。
 - サーバー側では poetry を使っているので、python コマンドは必ず全て poetry run 経由で実行します。python を直接実行すると .venv/ 以下のライブラリがインストールされていないために失敗します。
 
