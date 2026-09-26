@@ -34,6 +34,7 @@
                             keep-deleted-items
                             compact-reservations-on-tablet-horizontal
                             is-program-search-result
+                            :is-reservation-adding-enabled="defaultRecordSettings !== null"
                             @filter="isFilterDrawerOpen = true"
                             @added="updateReservedProgramIds"
                             @delete="updateReservedProgramIds"

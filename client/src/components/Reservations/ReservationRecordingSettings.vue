@@ -76,9 +76,12 @@
             <div class="reservation-recording-settings__label">録画フォルダのパス</div>
             <div class="reservation-recording-settings__description">
                 空欄にすると、デフォルトの録画フォルダに保存されます。
+                <div v-if="recordingFolderSource === undefined" class="mt-1">
+                    録画フォルダのプラグイン設定を取得できないため変更できません。EDCB のデフォルトプリセットに録画フォルダを設定し、再度開いてください。
+                </div>
             </div>
             <v-text-field
-                :disabled="reservation.is_recording_in_progress"
+                :disabled="reservation.is_recording_in_progress || recordingFolderSource === undefined"
                 v-model="recordingFolderPath"
                 color="primary"
                 variant="outlined"
@@ -94,12 +97,15 @@
             <div class="reservation-recording-settings__label">録画ファイル名テンプレート (マクロ)</div>
             <div class="reservation-recording-settings__description">
                 空欄にすると、デフォルトの録画ファイル名テンプレート (マクロ) が録画ファイル名の変更に利用されます。<br>
+                <div v-if="recordingFolderSource && !recordingFolderSource.recording_file_name_plugin" class="mt-1">
+                    この録画設定にはファイル名変更プラグインが指定されていません。マクロを使うには EDCB 側で設定してください。
+                </div>
                 <div class="mt-1">
                     <a class="link" href="https://github.com/xtne6f/EDCB/blob/work-plus-s/Document/Readme_EpgTimer.txt#L929-L1008" target="_blank">テンプレート構文の一覧</a> / <a class="link" href="https://github.com/xtne6f/EDCB/blob/work-plus-s/Document/Readme_Mod.txt#%E3%83%9E%E3%82%AF%E3%83%AD" target="_blank">xtne6f 版での追加差分</a>
                 </div>
             </div>
             <v-text-field
-                :disabled="reservation.is_recording_in_progress"
+                :disabled="reservation.is_recording_in_progress || !recordingFolderSource?.recording_file_name_plugin"
                 v-model="recordingFileNameTemplate"
                 color="primary"
                 variant="outlined"
@@ -243,6 +249,7 @@ import { ref, computed, watch, onMounted, toRaw } from 'vue';
 
 import { type IReservation, type IRecordSettings, type IRecordSettingsPresets } from '@/services/Reservations';
 import useVersionStore from '@/stores/VersionStore';
+import { editPrimaryRecordingFolder } from '@/utils/RecordingFolderSettings';
 
 // Props
 const props = defineProps<{
@@ -267,21 +274,24 @@ const settings = ref<IRecordSettings>(structuredClone(toRaw(props.reservation.re
 const initialSettings = ref<IRecordSettings>(structuredClone(toRaw(props.reservation.record_settings)));
 
 // 録画フォルダパス・録画ファイル名テンプレートの computed（settings.value を単一の情報源とする）
-// 録画フォルダは仕様上は複数指定できるが、複数指定はほとんど使われないので、KonomiTV では常に 0 番目の要素を使用する
+// 通常録画の先頭フォルダだけを編集し、ワンセグ用や追加の保存先は保持する
 // 録画フォルダが空の場合はデフォルトの録画フォルダに保存される（フォーム上は空欄としておく）
+const primaryRecordingFolder = computed(() => settings.value.recording_folders
+    .find(folder => !folder.is_oneseg_separate_recording_folder));
+const defaultRecordingFolder = computed(() => props.presets?.presets
+    .find(preset => preset.id === 0)?.record_settings.recording_folders
+    .find(folder => !folder.is_oneseg_separate_recording_folder));
+const recordingFolderSource = computed(() => primaryRecordingFolder.value ?? defaultRecordingFolder.value);
+
 const recordingFolderPath = computed({
-    get: () => settings.value.recording_folders.length > 0
-        ? settings.value.recording_folders[0].recording_folder_path
-        : '',
+    get: () => primaryRecordingFolder.value?.recording_folder_path ?? '',
     set: (value: string) => {
         updateRecordingFolderSettings(value, recordingFileNameTemplate.value);
     },
 });
 
 const recordingFileNameTemplate = computed({
-    get: () => settings.value.recording_folders.length > 0
-        ? settings.value.recording_folders[0].recording_file_name_template || ''
-        : '',
+    get: () => primaryRecordingFolder.value?.recording_file_name_template ?? '',
     set: (value: string) => {
         updateRecordingFolderSettings(recordingFolderPath.value, value);
     },
@@ -289,25 +299,11 @@ const recordingFileNameTemplate = computed({
 
 // 録画フォルダ設定を更新する関数
 const updateRecordingFolderSettings = (folderPath: string, fileNameTemplate: string) => {
-    const hasFolderPath = folderPath.trim() !== '';
-    const hasFileNameTemplate = fileNameTemplate.trim() !== '';
-
-    if (!hasFolderPath && !hasFileNameTemplate) {
-        // 両方とも空の場合は空リストにしてデフォルト設定を使用
-        settings.value.recording_folders = [];
-    } else {
-        // どちらか一方でも指定されている場合は新しい要素を追加
-        if (settings.value.recording_folders.length === 0) {
-            settings.value.recording_folders.push({
-                recording_folder_path: '',
-                recording_file_name_template: null,
-                is_oneseg_separate_recording_folder: false,
-            });
-        }
-        // 録画フォルダパスとマクロを更新
-        // 録画フォルダは仕様上は複数指定できるが、複数指定はほとんど使われないので、KonomiTV では常に 0 番目の要素を使用する
-        settings.value.recording_folders[0].recording_folder_path = folderPath;
-        settings.value.recording_folders[0].recording_file_name_template = fileNameTemplate || null;
+    const folders = editPrimaryRecordingFolder(
+        settings.value.recording_folders, defaultRecordingFolder.value, folderPath, fileNameTemplate,
+    );
+    if (folders !== null) {
+        settings.value.recording_folders = folders;
     }
 };
 

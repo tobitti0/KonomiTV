@@ -30,6 +30,8 @@ export interface IRecordSettings {
  */
 export interface IRecordingFolder {
     recording_folder_path: string;
+    write_plugin: string;
+    recording_file_name_plugin: string | null;
     recording_file_name_template: string | null;
     is_oneseg_separate_recording_folder: boolean;
 }
@@ -117,8 +119,8 @@ export interface IRecordSettingsGlobalDefaults {
 }
 
 /**
- * 録画設定のデフォルト値 (フォールバック用)
- * プリセット API の取得に失敗した場合に使用する
+ * 読み込み前の表示に使用する録画設定の初期値
+ * 新規予約には fetchDefaultRecordSettings() で取得した EDCB の設定を使用する
  */
 export const IRecordSettingsDefault: IRecordSettings = {
     is_enabled: true,
@@ -315,10 +317,10 @@ class Reservations {
 
     /**
      * デフォルトの録画設定を取得する
-     * プリセット API から ID=0 のデフォルトプリセットを取得し、失敗時は IRecordSettingsDefault にフォールバックする
-     * @returns デフォルトの録画設定
+     * プリセット API から EDCB の ID=0 のデフォルトプリセットを取得する
+     * @returns デフォルトの録画設定、取得失敗時は null
      */
-    static async fetchDefaultRecordSettings(): Promise<IRecordSettings> {
+    static async fetchDefaultRecordSettings(): Promise<IRecordSettings | null> {
         const presets = await Reservations.fetchRecordingPresets();
         if (presets !== null) {
             // ID=0 のデフォルトプリセットを探す
@@ -327,9 +329,7 @@ class Reservations {
                 return defaultPreset.record_settings;
             }
         }
-
-        // プリセット API の取得に失敗した場合はハードコードされたデフォルト値にフォールバック
-        return structuredClone(IRecordSettingsDefault);
+        return null;
     }
 }
 

@@ -738,8 +738,16 @@ class RecordSettings(BaseModel):
 class RecordingFolder(BaseModel):
     # 録画フォルダのパス
     recording_folder_path: str
-    # 録画ファイル名テンプレート: RecName_Macro.dll によるファイル名テンプレートの文字列
-    ## None のとき、RecName_Macro.dll のデフォルト設定に従う
+    # TS 書き込みプラグインのファイル名
+    ## EDCB for Windows では通常 Write_Default.dll、Linux 版では通常 Write_Default.so
+    ## 省略した古いクライアントからの更新は拒否し、接続先 OS を推測して補完しない
+    write_plugin: str
+    # 録画ファイル名変更プラグインのファイル名 / 未指定の場合は None (EDCB 側の設定に従う)
+    ## EDCB for Windows では通常 RecName_Macro.dll、Linux 版では通常 RecName_Macro.so
+    ## None は明示的な未指定であり、フィールド自体の省略とは区別する
+    recording_file_name_plugin: str | None
+    # 録画ファイル名変更プラグインに渡すファイル名テンプレート
+    ## None のとき、プラグインのデフォルト設定に従う
     recording_file_name_template: str | None = None
     # ワンセグ放送を別ファイルに同時録画する場合の録画フォルダかどうか
     is_oneseg_separate_recording_folder: bool = False

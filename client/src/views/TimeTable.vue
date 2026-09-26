@@ -164,9 +164,9 @@ let defaultRecordSettingsCache: IRecordSettings | null = null;
  * デフォルトの録画設定を取得する (キャッシュ付き)
  * EDCB バックエンドの場合は API からプリセットのデフォルト値を取得し、以降はキャッシュを返す
  * Mirakurun バックエンドの場合はハードコードされたフォールバック値を返す (プリセット API は EDCB 専用のため)
- * @returns デフォルトの録画設定
+ * @returns デフォルトの録画設定、EDCB から取得できなかった場合は null
  */
-async function getDefaultRecordSettings(): Promise<IRecordSettings> {
+async function getDefaultRecordSettings(): Promise<IRecordSettings | null> {
 
     // EDCB バックエンドでない場合は API を呼ばずにフォールバック値を返す
     // プリセット API は EDCB 専用のため、Mirakurun バックエンドで呼ぶとエラーになる
@@ -178,8 +178,7 @@ async function getDefaultRecordSettings(): Promise<IRecordSettings> {
     }
 
     // プリセット API から取得し、成功した場合のみキャッシュに保存する
-    // API 失敗時はフォールバック値を返すが、キャッシュには保存しない
-    // (EDCB が一時的にダウンしていた場合、復旧後に再取得できるようにするため)
+    // EDCB が一時的にダウンしていた場合、復旧後に再取得できるよう失敗時はキャッシュしない
     const presets = await Reservations.fetchRecordingPresets();
     if (presets !== null) {
         const defaultPreset = presets.presets.find(preset => preset.id === 0);
@@ -188,7 +187,7 @@ async function getDefaultRecordSettings(): Promise<IRecordSettings> {
             return structuredClone(defaultPreset.record_settings);
         }
     }
-    return structuredClone(IRecordSettingsDefault);
+    return null;
 }
 
 // UI 状態
@@ -576,14 +575,22 @@ async function onShowProgramDetail(programId: string, channel: IChannel, program
             drawerChannel.value = null;
         } else {
             // 取得失敗時は mock の IReservation を作成して渡す
-            drawerReservation.value = await createMockReservation(program, channel);
+            const mockReservation = await createMockReservation(program, channel);
+            if (mockReservation === null) {
+                return;
+            }
+            drawerReservation.value = mockReservation;
             drawerProgram.value = null;
             drawerChannel.value = null;
         }
     } else {
         // 予約がない場合は mock の IReservation を作成して渡す
         // id が -1 の場合は mock と判定され、予約追加ボタンが表示される
-        drawerReservation.value = await createMockReservation(program, channel);
+        const mockReservation = await createMockReservation(program, channel);
+        if (mockReservation === null) {
+            return;
+        }
+        drawerReservation.value = mockReservation;
         drawerProgram.value = null;
         drawerChannel.value = null;
     }
@@ -597,9 +604,13 @@ async function onShowProgramDetail(programId: string, channel: IChannel, program
  * id が -1 の場合は mock と判定され、予約追加ボタンが表示される
  * @param program 番組情報
  * @param channel チャンネル情報
- * @returns mock の IReservation
+ * @returns mock の IReservation、EDCB のデフォルトプロファイルを取得できなかった場合は null
  */
-async function createMockReservation(program: ITimeTableProgram, channel: IChannel): Promise<IReservation> {
+async function createMockReservation(program: ITimeTableProgram, channel: IChannel): Promise<IReservation | null> {
+    const defaultRecordSettings = await getDefaultRecordSettings();
+    if (defaultRecordSettings === null) {
+        return null;
+    }
     return {
         id: -1,  // mock を示す特別な値 (ReservationDetailDrawer で判定に使用)
         channel: channel,
@@ -609,7 +620,7 @@ async function createMockReservation(program: ITimeTableProgram, channel: IChann
         comment: '',
         scheduled_recording_file_name: '',
         estimated_recording_file_size: 0,
-        record_settings: await getDefaultRecordSettings(),
+        record_settings: defaultRecordSettings,
     };
 }
 
@@ -686,6 +697,9 @@ async function onQuickReserve(programId: string, channel: IChannel, program: ITi
 
     // 予約がない場合はデフォルト設定でワンクリック予約追加
     const defaultSettings = await getDefaultRecordSettings();
+    if (defaultSettings === null) {
+        return;
+    }
     const success = await Reservations.addReservation(programId, defaultSettings);
     if (success) {
         Message.success('録画予約を追加しました。');

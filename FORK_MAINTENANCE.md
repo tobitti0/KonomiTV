@@ -210,7 +210,7 @@ git merge --abort
 
 - `future/box-history-import`: Box 履歴移行の一回限りのツール。統合しない
 - `future/normalize-recorded-program-titles`: 移行後のタイトル一括補正用。統合しない。2026-08-09 に本番で実行し、履歴インポート由来 1,332 件中 903 件を補正済み。ソースとテストは `e8cf3d6d` で専用リモートブランチへ保管
-- `future/recording-default-profile`: 恒久機能候補だが、レビューとテストが完了するまで統合しない
+- `future/recording-default-profile`: Linux EDCB の録画プラグイン保持。2026-09-26 に不足分の修正と回帰テストを完了し、`dev-tobitti` へ統合。仕様・検証手順は [EDCB_RECORDING_PLUGINS.md](EDCB_RECORDING_PLUGINS.md) を参照
 
 恒久機能を `future/*` から統合する場合も、本流追従とは別のコミットまたはマージとして扱います。本流更新のマージコミットへ無関係なWIPを混ぜません。
 

@@ -140,11 +140,16 @@ import Reservations, { IReservation } from '@/services/Reservations';
 import Utils, { ProgramUtils, dayjs } from '@/utils';
 
 // Props
-const props = defineProps<{
+const props = withDefaults(defineProps<{
     reservation: IReservation;
     compactOnTabletHorizontal?: boolean;
     isProgramSearchResult?: boolean;
-}>();
+    isReservationAddingEnabled?: boolean;
+}>(), {
+    compactOnTabletHorizontal: false,
+    isProgramSearchResult: false,
+    isReservationAddingEnabled: true,
+});
 
 // Emits
 const emit = defineEmits<{
@@ -170,7 +175,7 @@ const shouldShowProgramSearchAddButton = computed(() => {
 
 // 検索結果の予約追加ボタンは、放送済み・送信中の状態で操作を止める
 const isProgramSearchActionDisabled = computed(() => {
-    return isPastProgram.value === true || isAddingReservation.value === true;
+    return props.isReservationAddingEnabled === false || isPastProgram.value === true || isAddingReservation.value === true;
 });
 
 // 録画予約一覧では無効予約だけ薄くし、番組検索では終了済みの番組だけ状態を弱める
@@ -182,6 +187,9 @@ const isDisplayDisabled = computed(() => {
 });
 
 const programSearchActionLabel = computed(() => {
+    if (props.isReservationAddingEnabled === false) {
+        return '録画設定を取得できません';
+    }
     if (isPastProgram.value === true) {
         return '終了済み';
     }
@@ -390,7 +398,7 @@ const handleToggleEnabled = async () => {
 const handleAddButtonClick = async (event: Event) => {
     event.stopPropagation();
 
-    if (isProgramSearchActionDisabled.value === true) {
+    if (props.isReservationAddingEnabled === false || isProgramSearchActionDisabled.value === true) {
         return;
     }
 

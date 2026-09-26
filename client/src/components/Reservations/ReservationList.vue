@@ -71,6 +71,7 @@
                     :reservation="reservation"
                     :compact-on-tablet-horizontal="compactReservationsOnTabletHorizontal"
                     :is-program-search-result="isProgramSearchResult"
+                    :is-reservation-adding-enabled="isReservationAddingEnabled"
                     @added="handleReservationAdded"
                     @deleted="handleReservationDeleted"
                     @click="handleReservationClick" />
@@ -92,6 +93,7 @@
             v-model="drawerOpen"
             :reservation="selectedReservation"
             :is-past-program="selectedReservation !== null ? isPastReservation(selectedReservation) : false"
+            :is-reservation-adding-enabled="isReservationAddingEnabled"
             @added="handleDrawerReservationAdded"
             @deleted="handleReservationDeleted"
             @updated="handleReservationSave" />
@@ -127,6 +129,7 @@ const props = withDefaults(defineProps<{
     filterButtonLabel?: string;
     compactReservationsOnTabletHorizontal?: boolean;
     isProgramSearchResult?: boolean;
+    isReservationAddingEnabled?: boolean;
 }>(), {
     page: 1,
     sortOrder: 'desc',
@@ -144,6 +147,7 @@ const props = withDefaults(defineProps<{
     filterButtonLabel: undefined,
     compactReservationsOnTabletHorizontal: false,
     isProgramSearchResult: false,
+    isReservationAddingEnabled: true,
 });
 
 // 現在のページ番号
