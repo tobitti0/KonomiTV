@@ -119,8 +119,8 @@ export interface IRecordSettingsGlobalDefaults {
 }
 
 /**
- * 録画設定のデフォルト値 (フォールバック用)
- * プリセット API の取得に失敗した場合に使用する
+ * 読み込み前の表示に使用する録画設定の初期値
+ * 新規予約には fetchDefaultRecordSettings() で取得した EDCB の設定を使用する
  */
 export const IRecordSettingsDefault: IRecordSettings = {
     is_enabled: true,

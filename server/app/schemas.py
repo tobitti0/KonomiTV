@@ -621,10 +621,12 @@ class RecordingFolder(BaseModel):
     recording_folder_path: str
     # TS 書き込みプラグインのファイル名
     ## EDCB for Windows では通常 Write_Default.dll、Linux 版では通常 Write_Default.so
-    write_plugin: str = 'Write_Default.dll'
-    # 録画ファイル名変更プラグインのファイル名 / 使用しない場合は None
+    ## 省略した古いクライアントからの更新は拒否し、接続先 OS を推測して補完しない
+    write_plugin: str
+    # 録画ファイル名変更プラグインのファイル名 / 未指定の場合は None (EDCB 側の設定に従う)
     ## EDCB for Windows では通常 RecName_Macro.dll、Linux 版では通常 RecName_Macro.so
-    recording_file_name_plugin: str | None = 'RecName_Macro.dll'
+    ## None は明示的な未指定であり、フィールド自体の省略とは区別する
+    recording_file_name_plugin: str | None
     # 録画ファイル名変更プラグインに渡すファイル名テンプレート
     ## None のとき、プラグインのデフォルト設定に従う
     recording_file_name_template: str | None = None

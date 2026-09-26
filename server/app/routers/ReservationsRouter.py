@@ -409,7 +409,7 @@ def DecodeEDCBRecSettingData(rec_settings_data: RecSettingDataRequired) -> schem
                 recording_folder_path = rec_folder['rec_folder'],
                 write_plugin = rec_folder['write_plug_in'],
                 recording_file_name_plugin = recording_file_name_plugin_raw if recording_file_name_plugin_raw != '' else None,
-                recording_file_name_template = recording_file_name_template_raw if separator != '' and recording_file_name_template_raw != '' else None,
+                recording_file_name_template = recording_file_name_template_raw if separator != '' else None,
                 is_oneseg_separate_recording_folder = key == 'partial_rec_folder',
             ))
 

@@ -114,7 +114,7 @@ def ParseRecordingFolders(
             plugin, separator, template = rec_name_plug_in.partition('?')
             if plugin != '':
                 recording_file_name_plugin = plugin
-            if separator != '' and template != '':
+            if separator != '':
                 recording_file_name_template = template
 
         folders.append(schemas.RecordingFolder(
