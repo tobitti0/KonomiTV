@@ -356,6 +356,24 @@ DB 自体を戻す必要がある場合だけ、KonomiTV container を停止し�
 
 ## 運用記録
 
+### 2026-09-26
+
+- Linux EDCB 対応ブランチの不足分を `fb3ab580` で修正し、`661190cf` で `dev-tobitti` へ統合・push
+- 統合後の回帰テスト 15 件、Ruff / Pyright / ESLint / TypeScript チェック、クライアントビルドに成功
+- 本番 checkout を `003eaf0d` から `661190cf` へ fast-forward し、KonomiTV のみを build / recreate
+- 新 image: `sha256:b815579a4c2c0f186fda34b7f2be6dda03b4c850a9b22ed6294e996d5c62628e`
+- バックアップ: `/home/tobitti/Dockers/TVSystems/KonomiTV-deploy-backups/20260926-edcb.cQ7MWW`
+- 復旧用 image tag: `tvsystems-konomitv:rollback-20260926-edcb.cQ7MWW`
+- SQLite backup の整合性を確認し、新 image でコピー DB に `aerich upgrade` を実行して `No upgrade items found` を確認
+- 新 image 内のサーバー回帰テスト 8 件、NVEncC 9.31 / GTX 1050 Ti の H.264・H.265 対応を確認
+- 起動後の予約 35 件とデフォルトプリセットで `Write_Default.so` / `RecName_Macro.so` を確認
+- ホーム、チャンネル 60 件、録画一覧 2,463 件の API 応答、ローカル録画と Box-only 録画の Range 応答 (いずれも 206 / 1,024 bytes) を確認
+- 利用中の `gr011-1080p` が NVEncC で ONAir になることをログで確認。検証用予約は作成していない
+- 他サービスの container ID は切替前後で一致し、KonomiTV の再起動ループなし
+- 起動時スキャンで一部の既存 TS のメタデータ解析失敗が再出現。確認した同一ファイルは 2026-08-27 のログにも記録されており、今回の予約設定修正とは切り分けて扱う
+- プラグイン名を省略する旧クライアントは 422 になるため、利用時はブラウザー・PWA を再読み込みする
+- 本番の Git URL がグローバル設定で SSH へ書き換えられ取得が遅延したため、今回の fetch のみ `GIT_CONFIG_GLOBAL=/dev/null` で HTTPS を使用。永続設定の変更なし
+
 ### 2026-08-27
 
 - `origin/master` を `ba7a6f04` から本流 `5cbbd348` へ fast-forward
